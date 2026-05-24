@@ -91,8 +91,12 @@ This forces a choice, and the choice decides **what data you train on**:
 > A box detector can still *find/classify* pieces, but a box is the wrong place to read the base
 > from. **Good contact-point labels are free:** ChessReD gives each piece's true square + the board
 > corners, so the contact-point target = that square's center projected through the homography,
-> independent of any box. (The first Faster R-CNN baseline is a box detector; its box→contact
-> conversion is the expected weak link, and the planned successor is a base-keypoint head.)
+> independent of any box — and **validated**: overlaying these points on the most-occluded boards,
+> each lands at the piece's base even when the base is hidden behind a nearer piece (so no manual
+> labelling is needed to train a base-keypoint head; a Label Studio review is optional QA only).
+> (The first Faster R-CNN baseline is a box detector — best chessred2k val mAP ≈ 0.86, mAP@50 ≈ 0.999;
+> its box→contact conversion is the expected weak link, and the planned successor is a base-keypoint
+> head transplanted onto that trunk.)
 
 ### Approach B — Warp the board, classify per-square crops
 - Warp to canonical top-down, slice into 64 squares, classify each crop into 13 classes
