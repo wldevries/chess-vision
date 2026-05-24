@@ -54,6 +54,10 @@ class ChessReD:
     _meta: dict[int, ImageMeta] = field(repr=False)
     _corners: dict[int, dict[str, list[float]]] = field(repr=False)
     _pieces: dict[int, list[Piece]] = field(repr=False)
+    # raw["splits"]: official image-id splits. "train"/"val"/"test" cover the full
+    # 10,800-image set; the bbox-carrying chessred2k subset has its own nested
+    # train/val/test (the detection splits used in Phase 2).
+    _splits: dict = field(repr=False, default_factory=dict)
 
     @classmethod
     def load(cls, data_root: str | Path, images_root: str | Path | None = None) -> ChessReD:
@@ -100,6 +104,7 @@ class ChessReD:
             _meta=meta,
             _corners=corners,
             _pieces=dict(pieces),
+            _splits=raw.get("splits", {}),
         )
 
     def images_with_corners(self) -> Iterator[AnnotatedImage]:
@@ -110,6 +115,25 @@ class ChessReD:
                 corners=corners,
                 pieces=self._pieces.get(image_id, []),
             )
+
+    def chessred2k_split(self, split: str) -> list[int]:
+        """Image ids for an official chessred2k detection split ('train'|'val'|'test').
+
+        chessred2k is the only subset with piece bounding boxes, so it is the
+        Phase-2 detector's train/val/test source. Using the published split keeps
+        mAP comparable and avoids game-level leakage across splits.
+        """
+        node = self._splits["chessred2k"][split]
+        return list(node["image_ids"] if isinstance(node, dict) else node)
+
+    def meta(self, image_id: int) -> ImageMeta:
+        return self._meta[image_id]
+
+    def pieces(self, image_id: int) -> list[Piece]:
+        return self._pieces.get(image_id, [])
+
+    def corners(self, image_id: int) -> dict[str, list[float]] | None:
+        return self._corners.get(image_id)
 
     def resolve_image_path(self, meta: ImageMeta) -> Path:
         """On-disk path. Annotation `path` is `images/<game>/<file>`; the real tree
