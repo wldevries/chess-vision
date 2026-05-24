@@ -21,6 +21,10 @@ A from-scratch project to read a chess position from a photo and output FEN, des
   missed ~half the pieces. Removing scale/perspective variance is the biggest robustness win.
 - **Pieces are tall and lean.** Tall pieces extend into the squares *behind* them (away from the
   camera). Any square-based reasoning must account for this (see §4).
+- **The board-contact point must be predicted, not inferred from a box.** A bounding box's
+  bottom-center is a perspective-biased, occlusion-fragile proxy for where a piece meets the board
+  (full reasoning in §4). The homography is exact given a correct contact point, so put the model
+  effort *there*. Don't relitigate this.
 - **Reproducible env from day one.** Pin deps with upper bounds. This week alone, two breakages
   came from unpinned transitive deps: NumPy 2.x vs OpenCV, and `torch.load` flipping its
   `weights_only` default. Don't inherit that pain.
@@ -49,9 +53,11 @@ Three stages:
 1. **Board localization** — a model predicts board geometry. Start with **4-corner regression**
    (simplest) → homography. Upgrade later to predicting the full 81-point heatmap if occlusion
    hurts corner accuracy.
-2. **Piece detection in the *original* image** — detect pieces where they look natural (see §4).
-3. **Square assignment via base point** — map each detection to a square using the homography on
-   the piece's ground-contact point, then emit FEN.
+2. **Piece localization + classification in the *original* image** — pieces look natural (see §4);
+   the model predicts each piece's **class** and its **board-contact point** (the base).
+3. **Square assignment via the contact point** — map each piece's predicted contact point to a
+   square using the homography, then emit FEN. The contact point is **predicted directly, never
+   read off a bounding box** (see §4).
 
 ---
 
@@ -64,16 +70,29 @@ edges**, overlapping the squares behind it. This distortion is unavoidable when 
 
 This forces a choice, and the choice decides **what data you train on**:
 
-### Approach A — Detect in the original photo, assign by base point  ✅ recommended
-- Run the piece detector on the **natural, un-warped** image. Pieces look normal; the model
-  learns real appearance.
-- For each detection, take the **bottom-center of its box** (where the piece meets the board).
-  That point lies on the board plane, so the homography maps it to the correct square even though
-  the piece's body sticks up.
+### Approach A — Detect in the original photo, assign by contact point  ✅ recommended
+- Run the model on the **natural, un-warped** image. Pieces look normal; the model learns real
+  appearance.
+- For each piece, **predict its board-contact point directly** (a base keypoint, where the piece
+  meets the board). That point lies on the board plane, so the homography maps it to the correct
+  square even though the piece's body sticks up.
 - **Warping is used only for square assignment — never on piece images.**
-- **Training implication:** training a detector on pieces in normal perspective images is exactly
-  correct. Your worry ("is it a problem to train on pieces not in a warped/top-down image?") only
-  applies if you later feed warped images. In Approach A you never do, so it's a non-issue.
+- **Training implication:** training on pieces in normal perspective images is exactly correct.
+  Your worry ("is it a problem to train on pieces not in a warped/top-down image?") only applies
+  if you later feed warped images. In Approach A you never do, so it's a non-issue.
+
+> ⚠️ **Do not derive the contact point from a bounding box's bottom-center.** (This keeps coming
+> up — settle it here.) A tight box's bottom edge is the *front rim* of the base, not its center,
+> and the offset is not a fixable constant: it changes with piece height, board foreshortening
+> (far ranks compress), and camera azimuth. In dense or low-angle scenes a nearer piece occludes
+> the base, so the lowest *visible* pixel jumps to the body and the point lands a whole square too
+> far back. The homography→square math is exact **given a correct contact point** (the §1 self-check
+> hit 99.96% on ground-truth points), so the contact point is the bottleneck — predict it directly.
+> A box detector can still *find/classify* pieces, but a box is the wrong place to read the base
+> from. **Good contact-point labels are free:** ChessReD gives each piece's true square + the board
+> corners, so the contact-point target = that square's center projected through the homography,
+> independent of any box. (The first Faster R-CNN baseline is a box detector; its box→contact
+> conversion is the expected weak link, and the planned successor is a base-keypoint head.)
 
 ### Approach B — Warp the board, classify per-square crops
 - Warp to canonical top-down, slice into 64 squares, classify each crop into 13 classes
@@ -83,9 +102,10 @@ This forces a choice, and the choice decides **what data you train on**:
 - **Training implication:** input is sheared top-down crops, so you must train on warped crops.
   Training on normal piece images here would be a distribution mismatch and would hurt accuracy.
 
-**Recommendation:** start with **Approach A**. It matches your instinct (train on natural images),
-sidesteps the shear problem, and the base-point trick is a clean, robust way to get squares.
-Keep Approach B as a comparison if detection-in-image struggles with dense/occluded positions.
+**Recommendation:** start with **Approach A**. It matches your instinct (train on natural images)
+and sidesteps the shear problem. The square assignment is robust *as long as the contact point is
+predicted directly* — not read off a box bottom (see the warning above). Keep Approach B as a
+comparison if localization-in-image struggles with dense/occluded positions.
 
 ---
 
