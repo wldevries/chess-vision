@@ -75,6 +75,52 @@ def collate_detection(batch):
     return list(images), list(targets)
 
 
+def resize_targets(
+    rgb: np.ndarray, boxes: np.ndarray, keypoints: np.ndarray | None, max_size: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Downscale so the long side is <= `max_size`, scaling boxes/keypoints to match.
+    No-op (returns inputs) when the image already fits. Shared by the ChessReD and
+    capture datasets so both scale targets identically."""
+    h, w = rgb.shape[:2]
+    scale = max_size / max(h, w)
+    if scale >= 1.0:
+        return rgb, boxes, keypoints
+    rgb = cv2.resize(rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+    if keypoints is not None and keypoints.size:
+        keypoints = keypoints.copy()
+        keypoints[:, :, :2] *= scale
+    return rgb, boxes * scale, keypoints
+
+
+def augment_targets(
+    rgb: np.ndarray,
+    boxes: np.ndarray,
+    keypoints: np.ndarray | None,
+    *,
+    hflip_prob: float,
+    jitter: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Train-time horizontal flip + photometric jitter, mirroring boxes/keypoints on
+    the same flip draw. Shared by the ChessReD and capture datasets."""
+    if hflip_prob and torch.rand(1).item() < hflip_prob:
+        rgb = np.ascontiguousarray(rgb[:, ::-1])
+        w = rgb.shape[1]
+        if boxes.size:
+            x1 = w - boxes[:, 2]
+            x2 = w - boxes[:, 0]
+            boxes = boxes.copy()
+            boxes[:, 0], boxes[:, 2] = x1, x2
+        if keypoints is not None and keypoints.size:
+            keypoints = keypoints.copy()
+            keypoints[:, :, 0] = w - keypoints[:, :, 0]  # mirror x; y, vis unchanged
+    if jitter:
+        # brightness + contrast jitter; cheap photometric variety
+        alpha = 1.0 + (torch.rand(1).item() * 2 - 1) * jitter  # contrast
+        beta = (torch.rand(1).item() * 2 - 1) * jitter * 255.0  # brightness
+        rgb = np.clip(rgb.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
+    return rgb, boxes, keypoints
+
+
 class ChessReDDetection(Dataset):
     def __init__(
         self,
@@ -151,37 +197,14 @@ class ChessReDDetection(Dataset):
     def _resize(
         self, rgb: np.ndarray, boxes: np.ndarray, keypoints: np.ndarray | None = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-        h, w = rgb.shape[:2]
-        scale = self.config.max_size / max(h, w)
-        if scale >= 1.0:
-            return rgb, boxes, keypoints
-        rgb = cv2.resize(rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
-        if keypoints is not None and keypoints.size:
-            keypoints = keypoints.copy()
-            keypoints[:, :, :2] *= scale
-        return rgb, boxes * scale, keypoints
+        return resize_targets(rgb, boxes, keypoints, self.config.max_size)
 
     def _augment(
         self, rgb: np.ndarray, boxes: np.ndarray, keypoints: np.ndarray | None = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-        cfg = self.config
-        if cfg.hflip_prob and torch.rand(1).item() < cfg.hflip_prob:
-            rgb = np.ascontiguousarray(rgb[:, ::-1])
-            w = rgb.shape[1]
-            if boxes.size:
-                x1 = w - boxes[:, 2]
-                x2 = w - boxes[:, 0]
-                boxes = boxes.copy()
-                boxes[:, 0], boxes[:, 2] = x1, x2
-            if keypoints is not None and keypoints.size:
-                keypoints = keypoints.copy()
-                keypoints[:, :, 0] = w - keypoints[:, :, 0]  # mirror x; y, vis unchanged
-        if cfg.jitter:
-            # brightness + contrast jitter; cheap photometric variety
-            alpha = 1.0 + (torch.rand(1).item() * 2 - 1) * cfg.jitter  # contrast
-            beta = (torch.rand(1).item() * 2 - 1) * cfg.jitter * 255.0  # brightness
-            rgb = np.clip(rgb.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
-        return rgb, boxes, keypoints
+        return augment_targets(
+            rgb, boxes, keypoints, hflip_prob=self.config.hflip_prob, jitter=self.config.jitter
+        )
 
 
 class ChessReDKeypointDetection(ChessReDDetection):

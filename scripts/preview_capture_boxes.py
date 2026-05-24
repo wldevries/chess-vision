@@ -17,13 +17,8 @@ from pathlib import Path
 
 import cv2
 
+from chessvision.data.capture_detection import synthesize_piece_targets
 from chessvision.data.captures import CaptureDataset
-from chessvision.geometry import (
-    PIECE_HEIGHT_SCALE,
-    Orientation,
-    compute_homography,
-    project_piece_box,
-)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -37,13 +32,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--seed", type=int, default=42, help="shuffle seed so samples span sessions")
     add("--max-size", type=int, default=1600, help="downscale longest side to this; 0 = full res")
     add("--radius-squares", type=float, default=0.3, help="piece base radius (squares)")
-    add("--height-mult", type=float, default=1.0, help="global multiplier on piece heights")
-    add(
-        "--focal-scale",
-        type=float,
-        default=None,
-        help="force focal = scale * max(W,H); omit to estimate focal from the homography",
-    )
+    add("--margin", type=float, default=0.15, help="box margin per side (RoI context)")
     return p.parse_args(argv)
 
 
@@ -57,19 +46,15 @@ def main(argv: list[str] | None = None) -> int:
     print("sessions in sample:", sorted({s.session for s in samples}))
 
     for s in samples:
-        homography = compute_homography(s.corners, Orientation.R0)
         img = cv2.cvtColor(s.load_image(dataset.s3), cv2.COLOR_RGB2BGR)
-        for kp in s.pieces:
-            x1, y1, x2, y2 = project_piece_box(
-                homography,
-                kp.point,
-                (s.width, s.height),
-                height_squares=PIECE_HEIGHT_SCALE.get(kp.fen.lower(), 1.0) * args.height_mult,
-                radius_squares=args.radius_squares,
-                focal_scale=args.focal_scale,
-            )
+        # Draw the EXACT training targets (synthesized box + contact keypoint, margin
+        # and off-board dropping applied) so the overlay is what the head will crop.
+        boxes, _labels, kpts = synthesize_piece_targets(
+            s, radius_squares=args.radius_squares, margin=args.margin
+        )
+        for (x1, y1, x2, y2), kp in zip(boxes, kpts, strict=True):
             cv2.rectangle(img, (round(x1), round(y1)), (round(x2), round(y2)), (0, 200, 0), 2)
-            cv2.circle(img, (round(kp.point[0]), round(kp.point[1])), 5, (0, 0, 255), -1)
+            cv2.circle(img, (round(kp[0, 0]), round(kp[0, 1])), 5, (0, 0, 255), -1)
         if args.max_size and max(img.shape[:2]) > args.max_size:
             sc = args.max_size / max(img.shape[:2])
             img = cv2.resize(img, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
