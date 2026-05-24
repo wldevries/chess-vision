@@ -13,9 +13,23 @@ from chessvision.capture.app import create_app
 from chessvision.capture.games import (
     Game,
     Ply,
+    game_from_lichess_puzzle,
     load_pgn_file,
     load_pgn_text,
 )
+
+# A synthetic Lichess puzzle payload (no network): a Ruy-Lopez-ish position
+# reached after 4 game half-moves, with a 2-move solution.
+PUZZLE_PAYLOAD = {
+    "game": {"pgn": "e4 e5 Nf3 Nc6"},
+    "puzzle": {
+        "id": "abc12",
+        "initialPly": 3,  # replay moves 0..3 inclusive -> position after 2...Nc6
+        "solution": ["f1b5", "a7a6"],
+        "themes": ["middlegame", "short"],
+        "rating": 1500,
+    },
+}
 
 SAMPLE_PGN = Path("chessvision/capture/samples/opera_game.pgn")
 
@@ -80,6 +94,28 @@ def test_load_text_skips_moveless_entries_and_assigns_unique_ids() -> None:
 
 def test_moveless_pgn_yields_no_games() -> None:
     assert load_pgn_text('[White "x"]\n[Black "y"]\n\n*\n') == []
+
+
+def test_puzzle_payload_becomes_a_game_at_the_solver_position() -> None:
+    game = game_from_lichess_puzzle(PUZZLE_PAYLOAD)
+    assert game.game_id == "puzzle-abc12"
+    assert game.white == "Lichess puzzle" and game.black == "#abc12"
+    assert "rating 1500" in game.event and "middlegame" in game.event
+    # Ply 0 is the puzzle position (after 2...Nc6): White to move, full board.
+    start = game.plies[0]
+    assert start.is_start and start.turn == "w"
+    assert start.fen.startswith("r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R")
+    # The solution moves become the subsequent plies.
+    assert game.n_plies == 3
+    assert (game.plies[1].san, game.plies[1].uci) == ("Bb5", "f1b5")
+    assert game.plies[2].san == "a6"
+
+
+def test_puzzle_without_themes_still_builds() -> None:
+    payload = {"game": {"pgn": "e4 e5"}, "puzzle": {"id": "z", "initialPly": 1, "solution": []}}
+    game = game_from_lichess_puzzle(payload)
+    assert game.n_plies == 1  # just the position, no solution moves
+    assert game.event == "rating ?"
 
 
 @pytest.fixture

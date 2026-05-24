@@ -86,16 +86,17 @@ class Game:
         return len(self.plies)
 
 
-def game_from_node(node: chess.pgn.Game, game_id: str) -> Game:
-    """Convert a parsed PGN game into a `Game` with one `Ply` per half-move."""
-    headers = node.headers
-    board = node.board()  # honours a FEN/SetUp header if present
-    start_fen = board.fen()
+def _plies_from_board(board: chess.Board, moves: list[chess.Move]) -> list[Ply]:
+    """Walk `moves` from `board` (mutated in place), one `Ply` per half-move.
 
+    Ply 0 is `board`'s starting position; each later ply is the position *after*
+    the corresponding move, tagged with that move. Shared by PGN games and the
+    Lichess puzzle reconstruction.
+    """
     plies = [
         Ply(
             index=0,
-            fen=start_fen,
+            fen=board.fen(),
             move_number=0,
             turn="w" if board.turn == chess.WHITE else "b",
             san=None,
@@ -104,7 +105,7 @@ def game_from_node(node: chess.pgn.Game, game_id: str) -> Game:
             to_square=None,
         )
     ]
-    for move in node.mainline_moves():
+    for move in moves:
         san = board.san(move)
         move_number = board.fullmove_number
         board.push(move)
@@ -120,6 +121,15 @@ def game_from_node(node: chess.pgn.Game, game_id: str) -> Game:
                 to_square=chess.square_name(move.to_square),
             )
         )
+    return plies
+
+
+def game_from_node(node: chess.pgn.Game, game_id: str) -> Game:
+    """Convert a parsed PGN game into a `Game` with one `Ply` per half-move."""
+    headers = node.headers
+    board = node.board()  # honours a FEN/SetUp header if present
+    start_fen = board.fen()
+    plies = _plies_from_board(board, list(node.mainline_moves()))
 
     return Game(
         game_id=game_id,
@@ -184,6 +194,111 @@ def fetch_lichess_user(username: str, max_games: int = 10, token: str | None = N
     )
     resp.raise_for_status()
     return load_pgn_text(resp.text, source=_slug(f"lichess-{username}"))
+
+
+LICHESS_PUZZLE_NEXT = "https://lichess.org/api/puzzle/next"
+LICHESS_PUZZLE_DAILY = "https://lichess.org/api/puzzle/daily"
+LICHESS_PUZZLE_BY_ID = "https://lichess.org/api/puzzle/{id}"
+
+
+def _fen_piece_count(fen: str) -> int:
+    """Number of pieces on the board from a FEN's placement field."""
+    return sum(c.isalpha() for c in fen.split(" ", 1)[0])
+
+
+def _get_lichess_json(
+    url: str, *, params: dict | None = None, token: str | None = None, timeout: float = 20.0
+) -> dict:
+    import httpx  # lazy: only needed when fetching online
+
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = httpx.get(url, params=params or {}, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def game_from_lichess_puzzle(data: dict) -> Game:
+    """Build a `Game` from a Lichess puzzle API payload (`{game, puzzle}`).
+
+    The payload gives the source game's movetext + `initialPly` and the puzzle's
+    `solution`. We replay the game up to and including `initialPly` to reach the
+    puzzle position (the side to move there is the solver), then the solution
+    moves become the plies — each a distinct, real position to photograph.
+    """
+    puzzle, game = data["puzzle"], data["game"]
+    node = chess.pgn.read_game(io.StringIO(game["pgn"]))
+    if node is None:
+        raise ValueError("puzzle payload had no parseable game movetext")
+    board = node.board()
+    initial_ply = int(puzzle["initialPly"])
+    for i, move in enumerate(node.mainline_moves()):
+        board.push(move)
+        if i >= initial_ply:
+            break
+    solution = [chess.Move.from_uci(u) for u in puzzle.get("solution", [])]
+    plies = _plies_from_board(board, solution)
+
+    pid = puzzle.get("id", "?")
+    themes = " ".join(puzzle.get("themes", []))
+    rating = puzzle.get("rating", "?")
+    return Game(
+        game_id=f"puzzle-{pid}",
+        white="Lichess puzzle",
+        black=f"#{pid}",
+        event=f"rating {rating}" + (f"; {themes}" if themes else ""),
+        date="?",
+        result="*",
+        start_fen=plies[0].fen,
+        plies=plies,
+    )
+
+
+def fetch_lichess_puzzle_next(
+    *,
+    theme: str | None = None,
+    difficulty: str | None = None,
+    min_pieces: int | None = None,
+    token: str | None = None,
+    max_tries: int = 8,
+    timeout: float = 20.0,
+) -> Game:
+    """Fetch the next puzzle from Lichess as a `Game` (a fresh one each call).
+
+    `theme` maps to the API's `angle` (e.g. "middlegame", "endgame"); `difficulty`
+    is one of easiest/easier/normal/harder/hardest (needs a token to be honoured).
+    A `token` (personal access token; Lichess has no user/password API auth)
+    de-duplicates against your solved puzzles. `min_pieces` re-rolls until a dense
+    enough position turns up (best-effort within `max_tries`) — useful for the
+    occlusion-heavy positions a piece detector struggles with.
+    """
+    params: dict[str, str] = {}
+    if theme:
+        params["angle"] = theme
+    if difficulty:
+        params["difficulty"] = difficulty
+    game = None
+    for _ in range(max(1, max_tries)):
+        data = _get_lichess_json(LICHESS_PUZZLE_NEXT, params=params, token=token, timeout=timeout)
+        game = game_from_lichess_puzzle(data)
+        if min_pieces is None or _fen_piece_count(game.start_fen) >= min_pieces:
+            return game
+    return game  # best effort: return the last one even if below min_pieces
+
+
+def fetch_lichess_puzzle(
+    puzzle_id: str, *, token: str | None = None, timeout: float = 20.0
+) -> Game:
+    """Fetch one specific Lichess puzzle by id as a `Game`."""
+    url = LICHESS_PUZZLE_BY_ID.format(id=puzzle_id)
+    return game_from_lichess_puzzle(_get_lichess_json(url, token=token, timeout=timeout))
+
+
+def fetch_lichess_daily_puzzle(*, token: str | None = None, timeout: float = 20.0) -> Game:
+    """Fetch the Lichess daily puzzle as a `Game`."""
+    data = _get_lichess_json(LICHESS_PUZZLE_DAILY, token=token, timeout=timeout)
+    return game_from_lichess_puzzle(data)
 
 
 def _dedupe_ids(games: list[Game]) -> list[Game]:

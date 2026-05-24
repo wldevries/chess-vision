@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from chessvision.capture.games import Game, Ply
+from chessvision.capture.games import Game, Ply, fetch_lichess_puzzle_next
 from chessvision.geometry import (
     Orientation,
     canonical_to_image,
@@ -148,7 +148,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def create_app(games: list[Game], out_root: Path) -> FastAPI:
+def create_app(games: list[Game], out_root: Path, *, lichess_token: str | None = None) -> FastAPI:
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     games_by_id = {g.game_id: g for g in games}
@@ -234,6 +234,35 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
             }
             for g in games
         ]
+
+    @app.post("/api/puzzles/next")
+    def next_puzzle(
+        theme: str | None = Form(None),
+        difficulty: str | None = Form(None),
+        min_pieces: int | None = Form(None),
+    ) -> dict:
+        """Fetch a fresh Lichess puzzle on the fly, register it, and return its
+        summary so the client can immediately start a session on it."""
+        try:
+            game = fetch_lichess_puzzle_next(
+                theme=theme or None,
+                difficulty=difficulty or None,
+                min_pieces=min_pieces,
+                token=lichess_token,
+            )
+        except Exception as exc:  # network / API error -> surface as 502
+            raise HTTPException(502, f"could not fetch puzzle: {exc}") from exc
+        # Ids are unique per puzzle; re-fetching the same one just refreshes it.
+        games_by_id[game.game_id] = game
+        if all(g.game_id != game.game_id for g in games):
+            games.append(game)
+        return {
+            "game_id": game.game_id,
+            "label": game.label,
+            "white": game.white,
+            "black": game.black,
+            "n_plies": game.n_plies,
+        }
 
     @app.post("/api/session")
     def start_session(game_id: str = Form(...)) -> dict:

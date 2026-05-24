@@ -9,6 +9,12 @@
     # pull a lichess user's recent online games
     uv run python -m chessvision.capture --lichess-user DrNykterstein --max-games 20
 
+Puzzles can also be pulled live from the UI ("Next puzzle"), one fresh puzzle per
+click via the Lichess API — good for diverse, occlusion-heavy positions. Set
+LICHESS_TOKEN (a personal access token from lichess.org/account/oauth/token; the
+API has no user/password auth) in the environment or .env to de-duplicate against
+your solved puzzles and honour difficulty.
+
 Where to get historical pro games (download a .pgn and pass it with --pgn):
   - pgnmentor.com/files.html       per-player collections (Carlsen, Fischer, ...)
   - The Week in Chess (theweekinchess.com)   weekly tournament PGNs
@@ -21,9 +27,11 @@ written under --out, one folder per session.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import uvicorn
+from dotenv import load_dotenv
 
 from chessvision.capture.app import create_app
 from chessvision.capture.games import Game, fetch_lichess_user, load_pgn_paths
@@ -64,17 +72,20 @@ def load_games(args: argparse.Namespace) -> list[Game]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv()
     args = parse_args(argv)
     games = load_games(args)
     if not games:
         print("No games loaded. Pass --pgn FILE or --lichess-user NAME.")
         return 1
 
+    token = os.environ.get("LICHESS_TOKEN")
     print(f"Loaded {len(games)} game(s); writing captures under {args.out.resolve()}")
+    print("Live puzzles: " + ("token set" if token else "anonymous (set LICHESS_TOKEN to dedupe)"))
     print(
         f"Open http://{args.host}:{args.port} on the tablet, then pick a game and start snapping."
     )
-    app = create_app(games, args.out)
+    app = create_app(games, args.out, lichess_token=token)
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

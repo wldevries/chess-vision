@@ -104,6 +104,13 @@
     <span class="title">♟ capture</span>
     <select id="gameSelect" title="Game"></select>
     <button id="startBtn">Start</button>
+    <select id="puzzleTheme" title="Puzzle theme">
+      <option value="middlegame">middlegame</option>
+      <option value="any">any</option>
+      <option value="opening">opening</option>
+      <option value="endgame">endgame</option>
+    </select>
+    <button id="puzzleBtn" title="Fetch a fresh Lichess puzzle">Next puzzle</button>
     <span class="spacer"></span>
     <span class="result-chip" id="resultChip"></span>
     <span class="progress" id="progress">—</span>
@@ -440,6 +447,20 @@ async function startSession() {
   render();
   toast("Session " + state.session_id);
 }
+async function nextPuzzle() {
+  const theme = $("puzzleTheme").value;
+  const fields = {};
+  if (theme && theme !== "any") fields.theme = theme;
+  if (theme !== "endgame") fields.min_pieces = 20;  // bias toward dense, occlusion-heavy boards
+  toast("Fetching puzzle…");
+  const g = await postForm("/api/puzzles/next", fields);
+  const sel = $("gameSelect");
+  let o = [...sel.options].find((x) => x.value === g.game_id);
+  if (!o) { o = document.createElement("option"); o.value = g.game_id; sel.appendChild(o); }
+  o.textContent = `${g.label}  ·  ${g.n_plies} plies`;
+  sel.value = g.game_id;
+  await startSession();
+}
 async function goto(i) { if (state) { state = await postForm(`/api/session/${state.session_id}/goto`, { ply_index: i }); render(); } }
 async function flipView() {
   if (!state) return;
@@ -521,6 +542,7 @@ function toast(msg) {
 
 /* ---------- wiring ---------- */
 $("startBtn").onclick = () => startSession().catch((e) => toast(e.message));
+$("puzzleBtn").onclick = () => nextPuzzle().catch((e) => toast(e.message));
 $("snapBtn").onclick = snap;
 $("prevBtn").onclick = () => goto(state.ply_index - 1);
 $("nextBtn").onclick = () => goto(state.ply_index + 1);
