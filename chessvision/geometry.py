@@ -135,16 +135,18 @@ def bbox_base_point(bbox: Sequence[float], vertical_offset: float = 0.0) -> tupl
 
 
 # Per-piece box heights in squares, for `project_piece_box`. Keyed by lowercase FEN
-# letter. These keep the Staunton ordering (pawn shortest -> king tallest) but are
-# calibrated empirically (smaller than raw mm proportions) so the projected cylinder
-# boxes fit the pieces in the capture photos. Tune together via a global multiplier.
+# letter, pawn shortest -> king tallest. The box is only an RoI crop, so a piece must
+# never poke out the top (clipping starves the head) while over-covering is harmless.
+# These are therefore biased to cover the *tallest* set we capture (a cheap wooden set
+# whose pieces are tall relative to its squares), which over-covers shorter Staunton-
+# style sets slightly -- exactly the safe direction. Tune together via a multiplier.
 PIECE_HEIGHT_SCALE: dict[str, float] = {
-    "p": 0.6,
-    "r": 0.72,
-    "n": 0.75,
-    "b": 0.87,
-    "q": 1.05,
-    "k": 1.2,
+    "p": 0.85,
+    "r": 1.05,
+    "n": 1.1,
+    "b": 1.25,
+    "q": 1.45,
+    "k": 1.75,
 }
 
 
