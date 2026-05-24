@@ -88,9 +88,33 @@ def freeze_trunk(model: torch.nn.Module) -> torch.nn.Module:
     return model
 
 
+def freeze_for_finetune(model: torch.nn.Module) -> torch.nn.Module:
+    """Domain fine-tune freezing: train the box **classifier/regressor head** AND the
+    keypoint branch, keep the backbone + FPN + RPN frozen. The capture set's real gap
+    is piece *classification* on the user's own pieces (glass/wood), not localization
+    (the trunk already localizes well and the contact geometry is exact), so we give
+    the class head the capacity to adapt while the tiny low-diversity set can't corrupt
+    the shared trunk. Mirrors `freeze_trunk` but also unfreezes `roi_heads.box_predictor`.
+    """
+    for p in model.parameters():
+        p.requires_grad_(False)
+    for module in (
+        model.roi_heads.box_predictor,
+        model.roi_heads.keypoint_head,
+        model.roi_heads.keypoint_predictor,
+    ):
+        for p in module.parameters():
+            p.requires_grad_(True)
+    return model
+
+
 def keypoint_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
-    """The trainable (keypoint-branch) parameters, for the optimizer."""
+    """The trainable parameters (whatever the active freeze scheme leaves unfrozen)."""
     return [p for p in model.parameters() if p.requires_grad]
+
+
+# Alias: reads better at fine-tune call sites where >1 head is trainable.
+trainable_parameters = keypoint_parameters
 
 
 def save_keypoint_checkpoint(model: torch.nn.Module, path: str | Path, **extra) -> None:

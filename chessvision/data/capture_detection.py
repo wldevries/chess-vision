@@ -24,7 +24,7 @@ returns None) are **dropped** -- they have no square and would poison the RoI.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -161,23 +161,28 @@ class CaptureKeypointDetection(Dataset):
         }
 
 
-def leave_one_session_out(
+def split_by_sessions(
     dataset: CaptureDataset,
-    holdout_session: str,
+    val_sessions: Collection[str],
     config: CaptureKeypointConfig | None = None,
 ) -> tuple[CaptureKeypointDetection, CaptureKeypointDetection]:
-    """Split capture samples into (train, val) by session: every session except
-    `holdout_session` trains, `holdout_session` validates. This is the honest split
-    for a low-diversity set -- val is a board/pose the model never saw in train.
-    Train enables augmentation; val does not.
+    """Split capture samples into (train, val) by session: sessions in `val_sessions`
+    validate, the rest train. Splitting by **session** (not random frame) is mandatory
+    -- frames within a session are near-duplicate, so a random split leaks them.
+
+    With only two physical sets in the capture data (see the captures-two-boards note),
+    hold out a few sessions from *each* set so both train and val cover both boards: the
+    model must have seen a board to classify its pieces, and val then measures
+    generalization to unseen sessions/positions of boards it knows. Train augments;
+    val does not.
     """
-    if holdout_session not in dataset.sessions:
-        raise ValueError(f"unknown session {holdout_session!r}; have {dataset.sessions}")
+    val_set = set(val_sessions)
+    unknown = val_set - set(dataset.sessions)
+    if unknown:
+        raise ValueError(f"unknown sessions {sorted(unknown)}; have {dataset.sessions}")
     by_session = dataset.by_session()
-    train_samples = [
-        s for sess, group in by_session.items() if sess != holdout_session for s in group
-    ]
-    val_samples = by_session[holdout_session]
+    train_samples = [s for sess, group in by_session.items() if sess not in val_set for s in group]
+    val_samples = [s for sess in val_set for s in by_session[sess]]
     train = CaptureKeypointDetection(train_samples, dataset.s3, config, train=True)
     val = CaptureKeypointDetection(val_samples, dataset.s3, config, train=False)
     return train, val

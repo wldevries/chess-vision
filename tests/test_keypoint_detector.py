@@ -10,6 +10,7 @@ from chessvision.detector import build_detector  # noqa: E402
 from chessvision.keypoint_detector import (  # noqa: E402
     _is_keypoint_param,
     build_keypoint_detector,
+    freeze_for_finetune,
     freeze_trunk,
     keypoint_parameters,
 )
@@ -39,6 +40,21 @@ def test_freeze_trunk_trains_only_keypoint_branch():
     assert trainable
     assert all(_is_keypoint_param(n) for n in trainable)
     assert len(keypoint_parameters(m)) == len(trainable)
+
+
+def test_freeze_for_finetune_trains_class_and_keypoint_heads():
+    """Domain fine-tune unfreezes the box classifier + keypoint branch, nothing else."""
+    m = build_keypoint_detector()
+    freeze_for_finetune(m)
+    trainable = {n for n, p in m.named_parameters() if p.requires_grad}
+    assert trainable
+    assert all(
+        n.startswith("roi_heads.box_predictor") or _is_keypoint_param(n) for n in trainable
+    )
+    # the classifier head specifically must be trainable (it's the point of this freeze)
+    assert any(n.startswith("roi_heads.box_predictor.cls_score") for n in trainable)
+    # backbone/RPN must stay frozen
+    assert not any(n.startswith(("backbone", "rpn")) for n in trainable)
 
 
 def test_train_forward_has_keypoint_loss():
