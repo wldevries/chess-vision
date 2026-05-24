@@ -34,7 +34,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from chessvision.data.chessred import ChessReD
+from chessvision.data.chessred import AnnotatedImage, ChessReD
+from chessvision.data.contact import contact_points
 
 # ChessReD category_id 0..11 are the 12 pieces (12 == "empty", which has no box).
 # Detector label = category_id + 1; label 0 is torchvision's background.
@@ -110,30 +111,34 @@ class ChessReDDetection(Dataset):
     def __len__(self) -> int:
         return len(self.image_ids)
 
-    def __getitem__(self, idx: int):
-        image_id = self.image_ids[idx]
-        meta = self.ds.meta(image_id)
-        path = self.ds.resolve_image_path(meta)
-
+    def _read_rgb(self, image_id: int) -> np.ndarray:
+        path = self.ds.resolve_image_path(self.ds.meta(image_id))
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if bgr is None:
             raise FileNotFoundError(f"could not read image {path}")
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-        boxes = []
-        labels = []
+    def _boxes_labels(self, image_id: int) -> tuple[np.ndarray, np.ndarray]:
+        boxes, labels = [], []
         for p in self.ds.pieces(image_id):
             if p.bbox is None:
                 continue
             x, y, w, h = p.bbox  # COCO xywh
             boxes.append([x, y, x + w, y + h])  # -> xyxy
             labels.append(p.category_id + 1)  # 0 reserved for background
-        boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
-        labels = np.asarray(labels, dtype=np.int64)
+        return (
+            np.asarray(boxes, dtype=np.float32).reshape(-1, 4),
+            np.asarray(labels, dtype=np.int64),
+        )
 
-        rgb, boxes = self._resize(rgb, boxes)
+    def __getitem__(self, idx: int):
+        image_id = self.image_ids[idx]
+        rgb = self._read_rgb(image_id)
+        boxes, labels = self._boxes_labels(image_id)
+
+        rgb, boxes, _ = self._resize(rgb, boxes)
         if self.train:
-            rgb, boxes = self._augment(rgb, boxes)
+            rgb, boxes, _ = self._augment(rgb, boxes)
 
         image = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float() / 255.0
         target = {
@@ -143,15 +148,22 @@ class ChessReDDetection(Dataset):
         }
         return image, target
 
-    def _resize(self, rgb: np.ndarray, boxes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _resize(
+        self, rgb: np.ndarray, boxes: np.ndarray, keypoints: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
         h, w = rgb.shape[:2]
         scale = self.config.max_size / max(h, w)
         if scale >= 1.0:
-            return rgb, boxes
+            return rgb, boxes, keypoints
         rgb = cv2.resize(rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
-        return rgb, boxes * scale
+        if keypoints is not None and keypoints.size:
+            keypoints = keypoints.copy()
+            keypoints[:, :, :2] *= scale
+        return rgb, boxes * scale, keypoints
 
-    def _augment(self, rgb: np.ndarray, boxes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _augment(
+        self, rgb: np.ndarray, boxes: np.ndarray, keypoints: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
         cfg = self.config
         if cfg.hflip_prob and torch.rand(1).item() < cfg.hflip_prob:
             rgb = np.ascontiguousarray(rgb[:, ::-1])
@@ -161,9 +173,58 @@ class ChessReDDetection(Dataset):
                 x2 = w - boxes[:, 0]
                 boxes = boxes.copy()
                 boxes[:, 0], boxes[:, 2] = x1, x2
+            if keypoints is not None and keypoints.size:
+                keypoints = keypoints.copy()
+                keypoints[:, :, 0] = w - keypoints[:, :, 0]  # mirror x; y, vis unchanged
         if cfg.jitter:
             # brightness + contrast jitter; cheap photometric variety
             alpha = 1.0 + (torch.rand(1).item() * 2 - 1) * cfg.jitter  # contrast
             beta = (torch.rand(1).item() * 2 - 1) * cfg.jitter * 255.0  # brightness
             rgb = np.clip(rgb.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
-        return rgb, boxes
+        return rgb, boxes, keypoints
+
+
+class ChessReDKeypointDetection(ChessReDDetection):
+    """Detection dataset + per-piece board-contact keypoint target (Approach A).
+
+    Adds `target["keypoints"] = (N, 1, 3)` `[x, y, visibility=2]`, one keypoint per
+    box = that piece's contact point (square center projected through the homography,
+    via `contact_points`). Keypoints are kept index-aligned with `boxes` (same piece
+    order, same bbox-None skipping) and threaded through `_resize`/`_augment` so they
+    track image scaling and horizontal flips. Everything else is the box pipeline.
+    """
+
+    def __getitem__(self, idx: int):
+        image_id = self.image_ids[idx]
+        rgb = self._read_rgb(image_id)
+        annotated = AnnotatedImage(
+            meta=self.ds.meta(image_id),
+            corners=self.ds.corners(image_id),
+            pieces=self.ds.pieces(image_id),
+        )
+        cps = contact_points(annotated)  # aligned with annotated.pieces order
+
+        boxes, labels, kpts = [], [], []
+        for p, cp in zip(annotated.pieces, cps, strict=True):
+            if p.bbox is None:
+                continue
+            x, y, w, h = p.bbox
+            boxes.append([x, y, x + w, y + h])
+            labels.append(p.category_id + 1)
+            kpts.append([[cp.xy[0], cp.xy[1], 2.0]])  # COCO visibility 2 = labelled
+        boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
+        labels = np.asarray(labels, dtype=np.int64)
+        keypoints = np.asarray(kpts, dtype=np.float32).reshape(-1, 1, 3)
+
+        rgb, boxes, keypoints = self._resize(rgb, boxes, keypoints)
+        if self.train:
+            rgb, boxes, keypoints = self._augment(rgb, boxes, keypoints)
+
+        image = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float() / 255.0
+        target = {
+            "boxes": torch.from_numpy(np.ascontiguousarray(boxes)),
+            "labels": torch.from_numpy(labels),
+            "keypoints": torch.from_numpy(np.ascontiguousarray(keypoints)),
+            "image_id": torch.tensor([image_id], dtype=torch.int64),
+        }
+        return image, target
