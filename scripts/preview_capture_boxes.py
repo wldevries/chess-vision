@@ -38,7 +38,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--max-size", type=int, default=1600, help="downscale longest side to this; 0 = full res")
     add("--radius-squares", type=float, default=0.3, help="piece base radius (squares)")
     add("--height-mult", type=float, default=1.0, help="global multiplier on piece heights")
-    add("--focal-scale", type=float, default=1.0, help="assumed focal = scale * max(W,H)")
+    add(
+        "--focal-scale",
+        type=float,
+        default=None,
+        help="force focal = scale * max(W,H); omit to estimate focal from the homography",
+    )
     return p.parse_args(argv)
 
 
