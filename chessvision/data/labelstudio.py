@@ -205,7 +205,7 @@ def build_task(
     result: list[dict] = []
     if record.get("corners"):
         result.extend(_corner_regions(record["corners"], w, h))
-    for piece in record.get("pieces", []):
+    for piece in record.get("pieces") or []:
         if include_boxes:
             result.append(_rect_region(piece, w, h))
         result.append(_piece_point_region(piece, w, h))

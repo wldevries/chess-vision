@@ -387,6 +387,31 @@ def create_app(games: list[Game], out_root: Path, *, lichess_token: str | None =
             session.ply_index = session.clamp(session.ply_index + 1)
         return state_payload(session)
 
+    @app.post("/api/session/{session_id}/finish")
+    def finish(session_id: str) -> dict:
+        """Push this session's photos + metadata to the bucket and generate its
+        Label Studio point tasks. Called on game/puzzle completion (and on demand).
+        Size-based upload + overwriting tasks make it safe to call more than once."""
+        session = get_session(session_id)
+        if not session.captures:
+            raise HTTPException(400, "nothing captured in this session yet")
+        try:
+            from chessvision.data.publish import publish_session
+            from chessvision.data.storage import StorageConfig, get_client
+        except Exception as exc:  # pragma: no cover - import guard
+            raise HTTPException(503, f"storage support unavailable: {exc}") from exc
+        try:
+            config = StorageConfig.from_env()
+            client = get_client(config)
+            result = publish_session(
+                session.out_dir, session.session_id, session.captures, config=config, client=client
+            )
+        except RuntimeError as exc:  # missing/incomplete .env config
+            raise HTTPException(503, str(exc)) from exc
+        except Exception as exc:  # network / S3 failure
+            raise HTTPException(502, f"publish failed: {exc}") from exc
+        return {"session_id": session_id, **result}
+
     @app.delete("/api/session/{session_id}/capture/{filename}")
     def delete_capture(session_id: str, filename: str) -> dict:
         session = get_session(session_id)

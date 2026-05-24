@@ -124,6 +124,36 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(games, tmp_path))
 
 
+def test_finish_requires_a_capture(client: TestClient) -> None:
+    game_id = client.get("/api/games").json()[0]["game_id"]
+    sid = client.post("/api/session", data={"game_id": game_id}).json()["session_id"]
+    resp = client.post(f"/api/session/{sid}/finish")
+    assert resp.status_code == 400
+
+
+def test_finish_publishes_the_session(client: TestClient, monkeypatch) -> None:
+    # Storage config present (no real network — publish_session is stubbed).
+    monkeypatch.setenv("MINIO_ENDPOINT_URL", "http://fake:9000")
+    for var in ("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET"):
+        monkeypatch.setenv(var, "x")
+    calls: list = []
+    monkeypatch.setattr(
+        "chessvision.data.publish.publish_session",
+        lambda *a, **k: calls.append((a, k)) or {"uploaded": 2, "skipped": 0, "tasks": 1},
+    )
+
+    game_id = client.get("/api/games").json()[0]["game_id"]
+    sid = client.post("/api/session", data={"game_id": game_id}).json()["session_id"]
+    client.post(
+        f"/api/session/{sid}/snap", files={"image": ("f.jpg", b"\xff\xd8\xff\xd9", "image/jpeg")}
+    )
+
+    resp = client.post(f"/api/session/{sid}/finish")
+    assert resp.status_code == 200
+    assert resp.json() == {"session_id": sid, "uploaded": 2, "skipped": 0, "tasks": 1}
+    assert len(calls) == 1  # publish_session was invoked once
+
+
 def test_api_lists_games_and_runs_a_snap_cycle(client: TestClient, tmp_path: Path) -> None:
     listed = client.get("/api/games").json()
     assert len(listed) == 1

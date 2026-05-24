@@ -111,6 +111,7 @@
       <option value="endgame">endgame</option>
     </select>
     <button id="puzzleBtn" title="Fetch a fresh Lichess puzzle">Next puzzle</button>
+    <button id="finishBtn" title="Upload photos + metadata to S3 and create Label Studio tasks">Finish &amp; upload</button>
     <span class="spacer"></span>
     <span class="result-chip" id="resultChip"></span>
     <span class="progress" id="progress">—</span>
@@ -469,6 +470,24 @@ async function flipView() {
 }
 async function delCapture(fn) { if (state) { state = await fetch(`/api/session/${state.session_id}/capture/${fn}`, { method: "DELETE" }).then(j); render(); } }
 
+/* ---------- finish: upload photos + metadata, create Label Studio tasks ---------- */
+let finishing = false;
+const finishedSessions = new Set();
+async function finishSession(auto = false) {
+  if (!state || finishing) return;
+  const sid = state.session_id;
+  if (auto && finishedSessions.has(sid)) return;
+  finishing = true;
+  try {
+    if (!auto) toast("Uploading & creating tasks…");
+    const r = await postForm(`/api/session/${sid}/finish`, {});
+    finishedSessions.add(sid);
+    toast(`Uploaded ${r.uploaded} file(s) · ${r.tasks} task(s)`);
+  } finally {
+    finishing = false;
+  }
+}
+
 /* ---------- render ---------- */
 function render() {
   if (!state) return;
@@ -489,6 +508,10 @@ function render() {
     ? `${state.game.white} – ${state.game.black}  ·  ${state.captures.length}/${state.n_plies} snapped`
     : `${state.game.white} – ${state.game.black}  ·  ply ${state.ply_index}/${state.n_plies - 1}`;
   renderResultChip();
+  // Auto-publish once the game/puzzle is fully captured (guarded against repeats).
+  if (state.game_complete && !finishedSessions.has(state.session_id) && !finishing) {
+    finishSession(true).catch((e) => toast(e.message));
+  }
   $("prevBtn").disabled = state.ply_index <= 0;
   $("nextBtn").disabled = state.ply_index >= state.n_plies - 1;
   const done = state.captured_plies.includes(state.ply_index);
@@ -543,6 +566,7 @@ function toast(msg) {
 /* ---------- wiring ---------- */
 $("startBtn").onclick = () => startSession().catch((e) => toast(e.message));
 $("puzzleBtn").onclick = () => nextPuzzle().catch((e) => toast(e.message));
+$("finishBtn").onclick = () => finishSession().catch((e) => toast(e.message));
 $("snapBtn").onclick = snap;
 $("prevBtn").onclick = () => goto(state.ply_index - 1);
 $("nextBtn").onclick = () => goto(state.ply_index + 1);
