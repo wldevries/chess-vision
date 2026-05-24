@@ -220,45 +220,49 @@ def project_piece_box(
     """Bounding box (xyxy) of a piece modelled as a vertical 3D cylinder on the board.
 
     Given only a board-contact point (e.g. a hand-tagged keypoint, no box), recover
-    the camera (`camera_from_homography`) and project a cylinder of radius
+    the camera (`camera_from_homography`) and frame a cylinder of radius
     `radius_squares` and height `height_squares` (in squares) standing at the base.
-    Bounding the projected base+top rings yields a box that is correct under any
-    camera angle/orientation: it grows tall at low angles, leans for side views, and
-    widens to include the slant -- none of which a planar edge-ratio can capture.
+
+    Key subtlety: a piece is a 3D object standing *above* the board plane, so its
+    silhouette half-width in the image is the **apparent radius** ``f * r / depth`` --
+    NOT the radius of a board-plane circle (which foreshortens to near-zero for pieces
+    seen at a steep angle and would leave the box stuck against the contact point on
+    its near side). We therefore project the cylinder *axis* (base -> top) and inflate
+    that segment by the apparent radius at each end. The contact point then sits a full
+    radius in from the box on both sides; the lean of the axis adds the asymmetric
+    extra width on the side the piece tilts toward.
 
     `height_squares` should be set per piece type (see `PIECE_HEIGHT_SCALE`). Still
-    approximate (assumed focal length, cylinder model); the contact point remains the
-    exact keypoint target.
+    approximate (assumed focal length, straight cylinder); the contact point remains
+    the exact keypoint target.
     """
     base = np.asarray(base, dtype=np.float64).reshape(2)
     K, rot, t = camera_from_homography(homography, image_size, focal_scale)
+    f = float(K[0, 0])
     u, v = image_to_canonical(homography, base.reshape(1, 2).astype(np.float32))[0]
     z = height_squares / 8.0  # squares -> canonical units (board edge = 1 = 8 squares)
     r = radius_squares / 8.0
 
-    def project(pts3d: np.ndarray) -> np.ndarray:
-        cam = pts3d @ rot.T + t
+    def project(pts3d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        cam = pts3d @ rot.T + t  # camera-frame coords; cam[:, 2] is depth (>0 in front)
         img = cam @ K.T
-        return img[:, :2] / img[:, 2:3]
+        return img[:, :2] / img[:, 2:3], cam[:, 2]
 
-    # +Z must point toward the camera (piece tops rise *up* in the image, smaller y)
-    sign = 1.0 if project(np.array([[u, v, z]]))[0, 1] < base[1] else -1.0
-    ang = np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False)
-    ring = np.stack([np.cos(ang), np.sin(ang)], axis=1) * r
-    centres = np.vstack([[0.0, 0.0], ring])  # base centre + rim samples
-    pts = []
-    for du, dv in centres:
-        pts.append([u + du, v + dv, 0.0])  # base ring (on the board)
-        pts.append([u + du, v + dv, z * sign])  # top ring (height above)
-    proj = project(np.asarray(pts))
-    x1, y1 = float(proj[:, 0].min()), float(proj[:, 1].min())
-    x2, y2 = float(proj[:, 0].max()), float(proj[:, 1].max())
-    # The contact point is the keypoint target -- it MUST sit inside the box (else
-    # the keypoint head drops it). Include it, with a small pad so it's off the edge.
+    # +Z must point toward the camera (piece tops rise *up* in the image, smaller y).
+    top_xy, _ = project(np.array([[u, v, z]]))
+    sign = 1.0 if top_xy[0, 1] < base[1] else -1.0
+    axis, depth = project(np.array([[u, v, 0.0], [u, v, z * sign]]))
+    # Apparent silhouette radius (px) at each end: f * r / depth. A cylinder cross-
+    # section projects to ~this circle regardless of board foreshortening, so it sits
+    # symmetrically around the axis on both sides.
+    rad = f * r / np.maximum(depth, 1e-6)
+    x1 = float(min(axis[0, 0] - rad[0], axis[1, 0] - rad[1]))
+    x2 = float(max(axis[0, 0] + rad[0], axis[1, 0] + rad[1]))
+    y1 = float(min(axis[0, 1] - rad[0], axis[1, 1] - rad[1]))
+    y2 = float(max(axis[0, 1] + rad[0], axis[1, 1] + rad[1]))
+    # The contact point is the keypoint target -- guarantee it sits inside the box.
     bx, by = float(base[0]), float(base[1])
-    x1, y1, x2, y2 = min(x1, bx), min(y1, by), max(x2, bx), max(y2, by)
-    pad = 0.05 * (y2 - y1)
-    return (x1, y1, x2, y2 + pad)
+    return (min(x1, bx), min(y1, by), max(x2, bx), max(y2, by))
 
 
 def lattice_points(homography: np.ndarray) -> np.ndarray:

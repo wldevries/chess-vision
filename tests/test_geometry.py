@@ -126,6 +126,10 @@ def test_project_piece_box_contains_base_and_scales_with_height():
     for box in (pawn, king):  # the keypoint target must sit inside its box
         assert box[0] <= base[0] <= box[2]
         assert box[1] <= base[1] <= box[3]
+        # ...with real apparent-radius width on BOTH sides -- never flush to an edge
+        # (the old board-plane ring foreshortened to ~0 and pinned the box to the base).
+        half = 0.1 * (box[2] - box[0])
+        assert base[0] - box[0] > half and box[2] - base[0] > half
     assert (king[3] - king[1]) > (pawn[3] - pawn[1])  # taller piece -> taller box
 
 
