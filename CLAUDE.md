@@ -15,7 +15,17 @@ uv run pytest tests/test_cli.py::test_version_is_exposed   # single test
 uv run ruff check .      # lint
 uv run ruff format .     # format
 uv run chessvision <img> # CLI (also: uv run python predict.py <img>)
+
+uv run python scripts/sync_captures.py up    # push data/captures/ to MinIO
+uv run python scripts/sync_captures.py down  # pull it back (size-based skip)
 ```
+
+The captured dataset lives in a MinIO bucket on the local network (S3-compatible).
+Config is in `.env` (gitignored; template in `.env.example`): `MINIO_ENDPOINT_URL`
+(the API port `:9000`, not the console `:9001`), `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`,
+`MINIO_BUCKET`. Helper module: `chessvision/data/storage.py` (boto3 + python-dotenv).
+MinIO Community Edition no longer creates access keys in the web console — use
+`mc admin accesskey create <alias> --access-key chess-app`.
 
 Add a dependency with `uv add <pkg>` (or `uv add --dev <pkg>`); keep upper bounds on volatile deps (see Reproducibility). `uv.lock` is committed — never edit it by hand.
 
