@@ -35,7 +35,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--out-dir", type=Path, default=Path("runs/capture_boxes"))
     add("--limit", type=int, default=8)
     add("--seed", type=int, default=42, help="shuffle seed so samples span sessions")
-    add("--max-size", type=int, default=1600)
+    add("--max-size", type=int, default=1600, help="downscale longest side to this; 0 = full res")
     add("--radius-squares", type=float, default=0.3, help="piece base radius (squares)")
     add("--height-mult", type=float, default=1.0, help="global multiplier on piece heights")
     add("--focal-scale", type=float, default=1.0, help="assumed focal = scale * max(W,H)")
@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             cv2.rectangle(img, (round(x1), round(y1)), (round(x2), round(y2)), (0, 200, 0), 2)
             cv2.circle(img, (round(kp.point[0]), round(kp.point[1])), 5, (0, 0, 255), -1)
-        if max(img.shape[:2]) > args.max_size:
+        if args.max_size and max(img.shape[:2]) > args.max_size:
             sc = args.max_size / max(img.shape[:2])
             img = cv2.resize(img, None, fx=sc, fy=sc, interpolation=cv2.INTER_AREA)
         cv2.imwrite(str(args.out_dir / f"{s.session}_{s.task_id}.jpg"), img)
