@@ -51,11 +51,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--detector-ckpt", type=Path, default=Path("runs/detector/best.pt"))
     add("--val-sessions", default=DEFAULT_VAL_SESSIONS, help="comma-separated held-out sessions")
     add("--unfreeze", choices=FINETUNE_SCOPES, default="classifier", help="how much to adapt")
+    add("--optimizer", choices=("adamw", "sgd"), default="adamw")
     add("--epochs", type=int, default=5)
     add("--batch-size", type=int, default=2)
-    add("--lr", type=float, default=5e-4)
-    add("--momentum", type=float, default=0.9)
-    add("--weight-decay", type=float, default=1e-4)
+    add("--lr", type=float, default=1e-4, help="AdamW: ~1e-4; SGD: raise to ~5e-3")
+    add("--momentum", type=float, default=0.9, help="SGD only")
+    add("--weight-decay", type=float, default=1e-2)
     add("--max-size", type=int, default=1333)
     add("--hflip", type=float, default=0.5)
     add("--jitter", type=float, default=0.1)
@@ -130,13 +131,14 @@ def main(argv: list[str] | None = None) -> int:
     model = load_model(args, device)
     set_finetune_scope(model, args.unfreeze)
     n_train = sum(p.numel() for p in trainable_parameters(model))
-    print(f"unfreeze={args.unfreeze} | trainable params {n_train:,}")
-    optimizer = torch.optim.SGD(
-        trainable_parameters(model),
-        lr=args.lr,
-        momentum=args.momentum,
-        weight_decay=args.weight_decay,
-    )
+    print(f"unfreeze={args.unfreeze} | optimizer={args.optimizer} | trainable params {n_train:,}")
+    params = trainable_parameters(model)
+    if args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    else:
+        optimizer = torch.optim.SGD(
+            params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay
+        )
     scheduler = torch.optim.lr_scheduler.MultiStepLR(
         optimizer, milestones=[int(args.epochs * 0.7), int(args.epochs * 0.9)], gamma=0.1
     )
