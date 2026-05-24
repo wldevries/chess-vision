@@ -18,7 +18,19 @@ uv run chessvision <img> # CLI (also: uv run python predict.py <img>)
 
 uv run python scripts/sync_captures.py up    # push data/captures/ to MinIO
 uv run python scripts/sync_captures.py down  # pull it back (size-based skip)
+uv run python scripts/sync_captures.py tasks # build Label Studio pre-annotations -> bucket tasks/
 ```
+
+`tasks` reads local captures (marked corners + FEN-projected piece estimates) and
+writes one Label Studio task-JSON per frame to the same bucket under `tasks/` (not
+stored locally). Tasks are points-only: four labelled corner keypoints (`corners`
+control) plus one labelled keypoint per piece at its base (`pieces` control), verbose
+labels (`WhiteRook`, `TopLeft`, ...). Boxes are deferred — `--with-boxes` additionally
+emits approximate piece bounding boxes on a `boxes` control for a later detection pass.
+Point a Label Studio source storage
+at `s3://<bucket>/tasks/` with "Treat every bucket object as a source file" OFF, and
+paste the labelling config printed by the command into the project. Builder lives in
+`chessvision/data/labelstudio.py`.
 
 The captured dataset lives in a MinIO bucket on the local network (S3-compatible).
 Config is in `.env` (gitignored; template in `.env.example`): `MINIO_ENDPOINT_URL`

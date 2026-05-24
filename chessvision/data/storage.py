@@ -77,6 +77,16 @@ def get_client(config: StorageConfig):
     )
 
 
+def put_bytes(client, bucket: str, key: str, data: bytes, content_type: str) -> None:
+    """PUT an in-memory object (no local file) with an explicit Content-Type."""
+    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
+
+
+def get_bytes(client, bucket: str, key: str) -> bytes:
+    """Read an object's full body into memory."""
+    return client.get_object(Bucket=bucket, Key=key)["Body"].read()
+
+
 def _remote_sizes(client, bucket: str, prefix: str) -> dict[str, int]:
     """Map of key -> size for every object under `prefix`."""
     sizes: dict[str, int] = {}

@@ -8,14 +8,30 @@ Usage:
     uv run python scripts/sync_captures.py down          # bucket -> local
     uv run python scripts/sync_captures.py up --dry-run  # show what would move
     uv run python scripts/sync_captures.py up --prefix captures --local data/captures
+    uv run python scripts/sync_captures.py tasks         # build LS pre-annotations -> bucket tasks/
+
+The `tasks` command reads the local captures (the source of truth for marked
+corners and FEN-projected piece estimates) and writes one Label Studio task-JSON
+per frame straight to the bucket under `--tasks-prefix` (default `tasks`); nothing
+is written locally. Point a Label Studio source storage at that prefix with
+"Treat every bucket object as a source file" OFF. See chessvision/data/labelstudio.py.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from chessvision.data.storage import StorageConfig, download_prefix, get_client, upload_dir
+from chessvision.data import labelstudio as ls
+from chessvision.data.storage import (
+    StorageConfig,
+    download_prefix,
+    get_bytes,
+    get_client,
+    put_bytes,
+    upload_dir,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -23,7 +39,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument(
-        "direction", choices=["up", "down"], help="up: local->bucket, down: bucket->local"
+        "direction",
+        choices=["up", "down", "tasks"],
+        help="up: local->bucket, down: bucket->local, tasks: build LS pre-annotations->bucket",
     )
     p.add_argument("--local", type=Path, default=Path("data/captures"), help="local dataset dir")
     p.add_argument("--prefix", default="captures", help="key prefix within the bucket")
@@ -33,13 +51,74 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="re-upload even same-size objects (e.g. to repair Content-Type); up only",
     )
+    p.add_argument(
+        "--tasks-prefix",
+        default="tasks",
+        help="bucket prefix for generated Label Studio tasks (tasks command)",
+    )
+    p.add_argument(
+        "--model-version",
+        default=ls.MODEL_VERSION,
+        help="prediction model_version tag on generated tasks (tasks command)",
+    )
+    p.add_argument(
+        "--with-boxes",
+        action="store_true",
+        help="also emit approximate piece bounding boxes (control 'boxes'); tasks command",
+    )
     return p.parse_args(argv)
+
+
+def _image_size(args, config, client, session_id: str, filename: str, key: str):
+    """Image dimensions for percentage conversion: local frame if present, else
+    fetched from the bucket. Returns None if neither has it."""
+    local = args.local / session_id / filename
+    if local.exists():
+        return ls.image_size_from_path(local)
+    try:
+        return ls.image_size_from_bytes(get_bytes(client, config.bucket, key))
+    except Exception:
+        return None
+
+
+def run_tasks(args, config, client) -> int:
+    where = f"{config.bucket}/{args.tasks_prefix.strip('/')}"
+    print(f"building Label Studio tasks {args.local} -> {config.endpoint_url}/{where}")
+    built = skipped = 0
+    for session_id, record in ls.iter_records(args.local):
+        filename = record["filename"]
+        ikey = ls.image_key(args.prefix, session_id, filename)
+        size = _image_size(args, config, client, session_id, filename, ikey)
+        if size is None:
+            print(f"  !! no image for {ikey}; skipping (run `down` first?)")
+            skipped += 1
+            continue
+        task = ls.build_task(
+            record,
+            size,
+            ls.image_uri(config.bucket, ikey),
+            model_version=args.model_version,
+            include_boxes=args.with_boxes,
+        )
+        tkey = ls.task_key(args.tasks_prefix, session_id, filename)
+        if not args.dry_run:
+            body = json.dumps(task).encode("utf-8")
+            put_bytes(client, config.bucket, tkey, body, "application/json")
+        print(f"  {'(dry-run) ' if args.dry_run else ''}{tkey}")
+        built += 1
+    print(f"{built} tasks built, {skipped} skipped")
+    print("\nLabel Studio labelling config (paste into the project's Labeling Interface):\n")
+    print(ls.LABELING_CONFIG)
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = StorageConfig.from_env()
     client = get_client(config)
+
+    if args.direction == "tasks":
+        return run_tasks(args, config, client)
 
     where = f"{config.bucket}/{args.prefix.strip('/')}"
     if args.direction == "up":
