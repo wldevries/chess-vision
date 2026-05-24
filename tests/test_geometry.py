@@ -113,3 +113,24 @@ def test_golden_chessred_image0_corner_pieces():
     for square, bbox in GOLDEN_PIECES:
         base = bbox_base_point(bbox)
         assert square_for_point(h, base) == square
+
+
+def test_project_piece_box_contains_base_and_scales_with_height():
+    from chessvision.geometry import project_piece_box
+
+    h = compute_homography(SYNTH_CORNERS, Orientation.R0)
+    img_size = (1080, 920)
+    base = canonical_to_image(h, np.array([[0.5, 0.5]], dtype=np.float32))[0]
+    pawn = project_piece_box(h, base, img_size, height_squares=0.6)
+    king = project_piece_box(h, base, img_size, height_squares=1.2)
+    for box in (pawn, king):  # the keypoint target must sit inside its box
+        assert box[0] <= base[0] <= box[2]
+        assert box[1] <= base[1] <= box[3]
+    assert (king[3] - king[1]) > (pawn[3] - pawn[1])  # taller piece -> taller box
+
+
+def test_focal_from_homography_positive():
+    from chessvision.geometry import focal_from_homography
+
+    f = focal_from_homography(compute_homography(SYNTH_CORNERS, Orientation.R0), 540, 460)
+    assert f is None or f > 0

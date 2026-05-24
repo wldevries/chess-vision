@@ -134,6 +134,133 @@ def bbox_base_point(bbox: Sequence[float], vertical_offset: float = 0.0) -> tupl
     return (x + w / 2.0, y + h * (1.0 - vertical_offset))
 
 
+# Per-piece box heights in squares, for `project_piece_box`. Keyed by lowercase FEN
+# letter. These keep the Staunton ordering (pawn shortest -> king tallest) but are
+# calibrated empirically (smaller than raw mm proportions) so the projected cylinder
+# boxes fit the pieces in the capture photos. Tune together via a global multiplier.
+PIECE_HEIGHT_SCALE: dict[str, float] = {
+    "p": 0.6,
+    "r": 0.72,
+    "n": 0.75,
+    "b": 0.87,
+    "q": 1.05,
+    "k": 1.2,
+}
+
+
+def focal_from_homography(homography: np.ndarray, cx: float, cy: float) -> float | None:
+    """Estimate focal length from a single board->image homography (Zhang).
+
+    With principal point `(cx, cy)` and square, skewless pixels, the constraint that
+    `r1, r2` are orthonormal (`h1' . h2' = 0`, `|h1'| = |h2'|`, with `h' = K^-1 h`)
+    gives two equations linear in `w = 1/f^2`. Returns `f = 1/sqrt(w)` (averaging the
+    two), or None if the view is too degenerate to give a positive `w`.
+    """
+    a1, a2, a3 = (float(x) for x in homography[:, 0])
+    b1, b2, b3 = (float(x) for x in homography[:, 1])
+    r2 = cx * cx + cy * cy
+    # h1'.h2' = 0  ->  coef1 * w + a3*b3 = 0
+    coef1 = a1 * b1 + a2 * b2 - cx * (a3 * b1 + a1 * b3) - cy * (a3 * b2 + a2 * b3) + r2 * a3 * b3
+    # |h1'|^2 - |h2'|^2 = 0  ->  coef2 * w + (a3^2 - b3^2) = 0
+    coef2 = (
+        (a1 * a1 + a2 * a2)
+        - (b1 * b1 + b2 * b2)
+        - 2 * cx * (a1 * a3 - b1 * b3)
+        - 2 * cy * (a2 * a3 - b2 * b3)
+        + r2 * (a3 * a3 - b3 * b3)
+    )
+    ws = []
+    if abs(coef1) > 1e-12:
+        ws.append(-a3 * b3 / coef1)
+    if abs(coef2) > 1e-12:
+        ws.append(-(a3 * a3 - b3 * b3) / coef2)
+    ws = [w for w in ws if w > 0]
+    if not ws:
+        return None
+    return float((sum(ws) / len(ws)) ** -0.5)
+
+
+def camera_from_homography(
+    homography: np.ndarray, image_size: tuple[int, int], focal_scale: float | None = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Recover a pinhole camera (K, R, t) from a board->image homography.
+
+    Principal point is the image center. Focal length is **estimated from the
+    homography** (`focal_from_homography`); pass `focal_scale` to instead force
+    `f = focal_scale * max(W, H)` (fallback when estimation fails). With
+    `H = K [r1 r2 t]`, the rotation columns and translation follow up to scale;
+    `r3 = r1 x r2` completes the (SVD-orthonormalized) rotation. Canonical board
+    coords are the unit square [0,1]^2 (= 8 squares); Z is out of the board plane.
+    """
+    w, h = image_size
+    cx, cy = w / 2.0, h / 2.0
+    f = (focal_scale * max(w, h)) if focal_scale else focal_from_homography(homography, cx, cy)
+    if not f:
+        f = max(w, h)
+    K = np.array([[f, 0.0, cx], [0.0, f, cy], [0.0, 0.0, 1.0]])
+    M = np.linalg.inv(K) @ np.asarray(homography, dtype=np.float64)
+    scale = 2.0 / (np.linalg.norm(M[:, 0]) + np.linalg.norm(M[:, 1]))
+    r1, r2, t = M[:, 0] * scale, M[:, 1] * scale, M[:, 2] * scale
+    if t[2] < 0:  # board must be in front of the camera
+        r1, r2, t = -r1, -r2, -t
+    r3 = np.cross(r1, r2)
+    u, _, vt = np.linalg.svd(np.column_stack([r1, r2, r3]))
+    return K, u @ vt, t
+
+
+def project_piece_box(
+    homography: np.ndarray,
+    base: Point,
+    image_size: tuple[int, int],
+    *,
+    height_squares: float = 1.0,
+    radius_squares: float = 0.3,
+    focal_scale: float | None = None,
+) -> tuple[float, float, float, float]:
+    """Bounding box (xyxy) of a piece modelled as a vertical 3D cylinder on the board.
+
+    Given only a board-contact point (e.g. a hand-tagged keypoint, no box), recover
+    the camera (`camera_from_homography`) and project a cylinder of radius
+    `radius_squares` and height `height_squares` (in squares) standing at the base.
+    Bounding the projected base+top rings yields a box that is correct under any
+    camera angle/orientation: it grows tall at low angles, leans for side views, and
+    widens to include the slant -- none of which a planar edge-ratio can capture.
+
+    `height_squares` should be set per piece type (see `PIECE_HEIGHT_SCALE`). Still
+    approximate (assumed focal length, cylinder model); the contact point remains the
+    exact keypoint target.
+    """
+    base = np.asarray(base, dtype=np.float64).reshape(2)
+    K, rot, t = camera_from_homography(homography, image_size, focal_scale)
+    u, v = image_to_canonical(homography, base.reshape(1, 2).astype(np.float32))[0]
+    z = height_squares / 8.0  # squares -> canonical units (board edge = 1 = 8 squares)
+    r = radius_squares / 8.0
+
+    def project(pts3d: np.ndarray) -> np.ndarray:
+        cam = pts3d @ rot.T + t
+        img = cam @ K.T
+        return img[:, :2] / img[:, 2:3]
+
+    # +Z must point toward the camera (piece tops rise *up* in the image, smaller y)
+    sign = 1.0 if project(np.array([[u, v, z]]))[0, 1] < base[1] else -1.0
+    ang = np.linspace(0.0, 2.0 * np.pi, 8, endpoint=False)
+    ring = np.stack([np.cos(ang), np.sin(ang)], axis=1) * r
+    centres = np.vstack([[0.0, 0.0], ring])  # base centre + rim samples
+    pts = []
+    for du, dv in centres:
+        pts.append([u + du, v + dv, 0.0])  # base ring (on the board)
+        pts.append([u + du, v + dv, z * sign])  # top ring (height above)
+    proj = project(np.asarray(pts))
+    x1, y1 = float(proj[:, 0].min()), float(proj[:, 1].min())
+    x2, y2 = float(proj[:, 0].max()), float(proj[:, 1].max())
+    # The contact point is the keypoint target -- it MUST sit inside the box (else
+    # the keypoint head drops it). Include it, with a small pad so it's off the edge.
+    bx, by = float(base[0]), float(base[1])
+    x1, y1, x2, y2 = min(x1, bx), min(y1, by), max(x2, bx), max(y2, by)
+    pad = 0.05 * (y2 - y1)
+    return (x1, y1, x2, y2 + pad)
+
+
 def lattice_points(homography: np.ndarray) -> np.ndarray:
     """The 9x9 = 81 grid-corner points projected into the image, shape (81, 2),
     ordered row-major by (v, u) so it reshapes to (9, 9, 2) for drawing lines."""
