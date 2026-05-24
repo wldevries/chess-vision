@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>chessvision capture</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1f232b; --line: #2c313b; --fg: #e7e9ee;
+    --muted: #9aa3b2; --accent: #4f8cff; --good: #36c46b; --bad: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+  }
+  header {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header .title { font-weight: 700; letter-spacing: .3px; }
+  header .spacer { flex: 1; }
+  select, button {
+    font: inherit; color: var(--fg); background: #262b34; border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px; cursor: pointer;
+  }
+  select { max-width: 46vw; }
+  button:active { transform: translateY(1px); }
+  button.primary { background: var(--accent); border-color: var(--accent); font-weight: 700; }
+  button:disabled { opacity: .4; cursor: default; }
+  .progress { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px; min-height: 0; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+          padding: 12px; display: flex; flex-direction: column; min-height: 0; }
+  .pane h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+
+  .camera-wrap { position: relative; flex: 1; min-height: 0; background: #000; border-radius: 10px; overflow: hidden; }
+  video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .cam-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 20px; }
+  .cam-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .cam-row select { flex: 1; max-width: none; }
+
+  .board-wrap { flex: 1; min-height: 0; display: grid; place-items: center; }
+  .board-wrap svg { width: 100%; height: 100%; max-width: 70vh; }
+  .instruction { font-size: 18px; margin: 10px 2px 4px; min-height: 1.4em; }
+  .move-label { font-weight: 700; color: var(--accent); }
+  .board-controls { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+
+  .snapbar { display: flex; gap: 12px; align-items: center; margin-top: 12px; }
+  .snap { flex: 1; font-size: 20px; padding: 18px; background: var(--good); border-color: var(--good); color: #06210f; font-weight: 800; }
+  .snap:disabled { background: #2a3a30; border-color: #2a3a30; color: var(--muted); }
+
+  footer { background: var(--panel); border-top: 1px solid var(--line); padding: 8px 12px; }
+  .review { display: flex; gap: 8px; overflow-x: auto; align-items: center; min-height: 92px; }
+  .review .empty { color: var(--muted); font-size: 14px; padding: 8px; }
+  .thumb { position: relative; flex: 0 0 auto; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }
+  .thumb img { display: block; height: 80px; width: auto; }
+  .thumb .tag { position: absolute; left: 0; bottom: 0; right: 0; font-size: 11px; padding: 1px 4px;
+                background: rgba(0,0,0,.6); color: #fff; }
+  .thumb .del { position: absolute; top: 2px; right: 2px; background: rgba(0,0,0,.55); color: #fff;
+                border: none; border-radius: 6px; padding: 2px 7px; font-size: 13px; line-height: 1; }
+
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; place-items: center; z-index: 20; }
+  .modal.show { display: grid; }
+  .modal img { max-width: 92vw; max-height: 86vh; border-radius: 8px; }
+  .modal .close { position: absolute; top: 16px; right: 20px; font-size: 26px; background: none; border: none; color: #fff; }
+
+  .toast { position: fixed; left: 50%; bottom: 110px; transform: translateX(-50%);
+           background: #000a; border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px;
+           opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">♟ capture</span>
+    <select id="gameSelect" title="Game"></select>
+    <button id="startBtn">Start</button>
+    <span class="spacer"></span>
+    <span class="progress" id="progress">—</span>
+  </header>
+
+  <main>
+    <section class="pane">
+      <h2>Camera</h2>
+      <div class="cam-row">
+        <select id="cameraSelect" title="Camera"></select>
+        <button id="refreshCams" title="Re-detect cameras">↻</button>
+      </div>
+      <div class="camera-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="cam-empty" id="camEmpty">Grant camera access and pick your board-facing camera.</div>
+      </div>
+      <div class="snapbar">
+        <button class="snap" id="snapBtn" disabled>Snap ⏎</button>
+      </div>
+    </section>
+
+    <section class="pane">
+      <h2>Target position</h2>
+      <div class="board-wrap" id="board"></div>
+      <div class="instruction" id="instruction">Pick a game and press Start.</div>
+      <div class="board-controls">
+        <button id="prevBtn" disabled>◀ Prev</button>
+        <button id="nextBtn" disabled>Skip ▶</button>
+        <button id="flipBtn" disabled>Flip board</button>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="review" id="review"><span class="empty">Snapped photos appear here for review.</span></div>
+  </footer>
+
+  <div class="modal" id="modal"><button class="close" id="modalClose">×</button><img id="modalImg" alt="" /></div>
+  <div class="toast" id="toast"></div>
+
+  <canvas id="canvas" hidden></canvas>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const api = {
+  games: () => fetch("/api/games").then(r => r.json()),
+  start: (gameId) => post(`/api/session`, { game_id: gameId }),
+  goto: (sid, i) => post(`/api/session/${sid}/goto`, { ply_index: i }),
+  orient: (sid, o) => post(`/api/session/${sid}/orientation`, { orientation: o }),
+  del: (sid, fn) => fetch(`/api/session/${sid}/capture/${fn}`, { method: "DELETE" }).then(j),
+};
+function post(url, fields) {
+  const body = new FormData();
+  for (const [k, v] of Object.entries(fields)) body.append(k, v);
+  return fetch(url, { method: "POST", body }).then(j);
+}
+async function j(r) { const d = await r.json(); if (!r.ok) throw new Error(d.error || r.statusText); return d; }
+
+let state = null;          // latest session state from the server
+let stream = null;         // active MediaStream
+
+/* ---------- camera ---------- */
+async function listCameras() {
+  try {
+    // Need an initial permission grant before labels/devices are exposed.
+    if (!stream) {
+      const tmp = await navigator.mediaDevices.getUserMedia({ video: true });
+      tmp.getTracks().forEach(t => t.stop());
+    }
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+    const sel = $("cameraSelect");
+    sel.innerHTML = "";
+    devices.forEach((d, i) => {
+      const o = document.createElement("option");
+      o.value = d.deviceId; o.textContent = d.label || `Camera ${i + 1}`;
+      sel.appendChild(o);
+    });
+    const saved = localStorage.getItem("cv_camera");
+    if (saved && devices.some(d => d.deviceId === saved)) sel.value = saved;
+    if (devices.length) await startCamera(sel.value);
+    else toast("No camera found");
+  } catch (e) { toast("Camera blocked: " + e.message); }
+}
+async function startCamera(deviceId) {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      deviceId: deviceId ? { exact: deviceId } : undefined,
+      width: { ideal: 3840 }, height: { ideal: 2160 },
+    },
+  });
+  $("video").srcObject = stream;
+  $("camEmpty").style.display = "none";
+  localStorage.setItem("cv_camera", deviceId);
+  updateSnapEnabled();
+}
+function captureBlob() {
+  const v = $("video"), c = $("canvas");
+  c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext("2d").drawImage(v, 0, 0);
+  return new Promise(res => c.toBlob(res, "image/jpeg", 0.92));
+}
+
+/* ---------- session flow ---------- */
+async function loadGames() {
+  const games = await api.games();
+  const sel = $("gameSelect");
+  sel.innerHTML = "";
+  games.forEach(g => {
+    const o = document.createElement("option");
+    o.value = g.game_id; o.textContent = `${g.label}  ·  ${g.n_plies} plies`;
+    sel.appendChild(o);
+  });
+}
+async function startSession() {
+  state = await api.start($("gameSelect").value);
+  render();
+  toast("Session " + state.session_id);
+}
+async function snap() {
+  if (!state || !stream) return;
+  $("snapBtn").disabled = true;
+  try {
+    const blob = await captureBlob();
+    const body = new FormData();
+    body.append("image", blob, "frame.jpg");
+    const r = await fetch(`/api/session/${state.session_id}/snap`, { method: "POST", body });
+    state = await j(r);
+    render();
+    toast("Saved ✓");
+  } catch (e) { toast("Snap failed: " + e.message); }
+  updateSnapEnabled();
+}
+async function goto(i) { if (state) { state = await api.goto(state.session_id, i); render(); } }
+async function flip() {
+  if (!state) return;
+  state = await api.orient(state.session_id, state.orientation === "white" ? "black" : "white");
+  render();
+}
+async function delCapture(fn) {
+  if (state) { state = await api.del(state.session_id, fn); render(); }
+}
+
+/* ---------- render ---------- */
+function render() {
+  if (!state) return;
+  $("board").innerHTML = state.board_svg;
+  const ply = state.ply;
+  $("instruction").innerHTML = state.instruction.replace(
+    ply.move_label, `<span class="move-label">${ply.move_label}</span>`);
+  $("progress").textContent =
+    `${state.game.white} – ${state.game.black}  ·  ply ${state.ply_index}/${state.n_plies - 1}`;
+  $("prevBtn").disabled = state.ply_index <= 0;
+  $("nextBtn").disabled = state.ply_index >= state.n_plies - 1;
+  $("flipBtn").disabled = false;
+  const done = state.captured_plies.includes(state.ply_index);
+  $("nextBtn").textContent = state.ply_index >= state.n_plies - 1 ? "End" : (done ? "Next ▶" : "Skip ▶");
+  renderReview();
+  updateSnapEnabled();
+}
+function updateSnapEnabled() {
+  $("snapBtn").disabled = !(state && stream);
+}
+function renderReview() {
+  const el = $("review");
+  if (!state.captures.length) { el.innerHTML = '<span class="empty">Snapped photos appear here for review.</span>'; return; }
+  el.innerHTML = "";
+  state.captures.slice().reverse().forEach(c => {
+    const d = document.createElement("div");
+    d.className = "thumb";
+    d.innerHTML =
+      `<img src="${c.url}" alt="" loading="lazy" />` +
+      `<span class="tag">${c.ply_index}: ${c.move_label}</span>` +
+      `<button class="del" title="Delete">×</button>`;
+    d.querySelector("img").onclick = () => openModal(c.url);
+    d.querySelector(".del").onclick = (ev) => { ev.stopPropagation(); delCapture(c.filename); };
+    el.appendChild(d);
+  });
+}
+function openModal(url) { $("modalImg").src = url; $("modal").classList.add("show"); }
+
+let toastTimer = null;
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+}
+
+/* ---------- wiring ---------- */
+$("startBtn").onclick = startSession;
+$("snapBtn").onclick = snap;
+$("prevBtn").onclick = () => goto(state.ply_index - 1);
+$("nextBtn").onclick = () => goto(state.ply_index + 1);
+$("flipBtn").onclick = flip;
+$("refreshCams").onclick = listCameras;
+$("cameraSelect").onchange = (e) => startCamera(e.target.value).catch(err => toast(err.message));
+$("modalClose").onclick = () => $("modal").classList.remove("show");
+$("modal").onclick = (e) => { if (e.target.id === "modal") $("modal").classList.remove("show"); };
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); snap(); }
+  else if (e.code === "ArrowLeft") goto(state.ply_index - 1);
+  else if (e.code === "ArrowRight") goto(state.ply_index + 1);
+});
+
+loadGames().catch(e => toast(e.message));
+listCameras();
+</script>
+</body>
+</html>

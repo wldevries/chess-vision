@@ -1,0 +1,83 @@
+"""Launch the position-capture web app.
+
+    # bundled sample game, opens on http://127.0.0.1:8000
+    uv run python -m chessvision.capture
+
+    # your own PGN collection (a file or a folder of .pgn files)
+    uv run python -m chessvision.capture --pgn games/carlsen.pgn
+
+    # pull a lichess user's recent online games
+    uv run python -m chessvision.capture --lichess-user DrNykterstein --max-games 20
+
+Where to get historical pro games (download a .pgn and pass it with --pgn):
+  - pgnmentor.com/files.html       per-player collections (Carlsen, Fischer, ...)
+  - The Week in Chess (theweekinchess.com)   weekly tournament PGNs
+  - Lichess Elite Database          large filtered online-game dump
+
+Photos and a captures.jsonl (one row per photo, with the ground-truth FEN) are
+written under --out, one folder per session.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import uvicorn
+
+from chessvision.capture.app import create_app
+from chessvision.capture.games import Game, fetch_lichess_user, load_pgn_paths
+
+SAMPLE_PGN = Path(__file__).parent / "samples" / "opera_game.pgn"
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="python -m chessvision.capture",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--pgn",
+        type=Path,
+        action="append",
+        default=[],
+        help="PGN file or directory (repeatable); omit to use the bundled sample",
+    )
+    p.add_argument("--lichess-user", default=None, help="also fetch this lichess user's games")
+    p.add_argument("--max-games", type=int, default=20, help="max games to fetch from lichess")
+    p.add_argument("--out", type=Path, default=Path("data/captures"), help="output directory")
+    p.add_argument("--host", default="127.0.0.1", help="bind host (use 0.0.0.0 for LAN access)")
+    p.add_argument("--port", type=int, default=8000)
+    return p.parse_args(argv)
+
+
+def load_games(args: argparse.Namespace) -> list[Game]:
+    games: list[Game] = []
+    if args.pgn:
+        games.extend(load_pgn_paths(args.pgn))
+    if args.lichess_user:
+        games.extend(fetch_lichess_user(args.lichess_user, args.max_games))
+    if not games:
+        games.extend(load_pgn_paths([SAMPLE_PGN]))
+    return games
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    games = load_games(args)
+    if not games:
+        print("No games loaded. Pass --pgn FILE or --lichess-user NAME.")
+        return 1
+
+    print(f"Loaded {len(games)} game(s); writing captures under {args.out.resolve()}")
+    print(
+        f"Open http://{args.host}:{args.port} on the tablet, then pick a game and start snapping."
+    )
+    app = create_app(games, args.out)
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
