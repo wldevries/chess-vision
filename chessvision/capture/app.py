@@ -70,12 +70,20 @@ def _round_pts(pts: np.ndarray) -> list[list[float]]:
     return [[round(float(x), 1), round(float(y), 1)] for x, y in pts]
 
 
-def compute_overlay(corners: CornerDict, orientation: Orientation, fen: str) -> dict:
+def compute_overlay(
+    corners: CornerDict,
+    orientation: Orientation,
+    fen: str,
+    from_square: str | None = None,
+    to_square: str | None = None,
+) -> dict:
     """Project the board grid and the FEN's occupied squares into the image.
 
     With fixed corners, every square's image location is known, so the known FEN
     gives a guesstimated base point (square center) and footprint quad for each
-    piece -- a weak label and a live alignment check, no detector needed.
+    piece -- a weak label and a live alignment check, no detector needed. If a
+    move is supplied, its from/to square quads come back too so the client can
+    highlight them on the live feed (mirroring the SVG board's lastmove).
     """
     homography = compute_homography(corners, orientation)
     polys = square_polygons(homography)
@@ -95,7 +103,18 @@ def compute_overlay(corners: CornerDict, orientation: Orientation, fen: str) -> 
                 "quad": _round_pts(polys[name]),
             }
         )
-    return {"lattice": _round_pts(lattice_points(homography)), "pieces": pieces}
+
+    move: dict | None = None
+    if from_square in polys and to_square in polys:
+        move = {
+            "from": {"square": from_square, "quad": _round_pts(polys[from_square])},
+            "to": {"square": to_square, "quad": _round_pts(polys[to_square])},
+        }
+    return {
+        "lattice": _round_pts(lattice_points(homography)),
+        "pieces": pieces,
+        "move": move,
+    }
 
 
 @dataclass
@@ -119,7 +138,10 @@ class Session:
     def overlay(self) -> dict | None:
         if self.corners is None:
             return None
-        return compute_overlay(self.corners, self.orientation, self.game.plies[self.ply_index].fen)
+        ply = self.game.plies[self.ply_index]
+        return compute_overlay(
+            self.corners, self.orientation, ply.fen, ply.from_square, ply.to_square
+        )
 
 
 def _now_iso() -> str:
@@ -155,14 +177,22 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
             "move_label": ply.move_label,
         }
 
-    def instruction(ply: Ply) -> str:
+    def result_label(result: str) -> str | None:
+        """Human-readable outcome for the PGN Result tag, or None if unfinished."""
+        return {"1-0": "White wins", "0-1": "Black wins", "1/2-1/2": "Draw"}.get(result)
+
+    def instruction(ply: Ply, is_final: bool) -> str:
         if ply.is_start:
             return "Set up the starting position, then Snap."
         mover = "White" if ply.mover_is_white else "Black"
-        return f"{mover} plays {ply.move_label} — set the board to match, then Snap."
+        prefix = "Final move · " if is_final else ""
+        return f"{prefix}{mover} plays {ply.move_label} — set the board to match, then Snap."
 
     def state_payload(session: Session) -> dict:
         ply = session.game.plies[session.ply_index]
+        captured_plies = sorted({c["ply_index"] for c in session.captures})
+        is_final_ply = session.ply_index == session.game.n_plies - 1
+        game_complete = is_final_ply and session.ply_index in captured_plies
         return {
             "session_id": session.session_id,
             "game": {
@@ -170,6 +200,8 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
                 "label": session.game.label,
                 "white": session.game.white,
                 "black": session.game.black,
+                "result": session.game.result,
+                "result_label": result_label(session.game.result),
             },
             "ply_index": session.ply_index,
             "n_plies": session.game.n_plies,
@@ -178,10 +210,12 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
             "orientation": session.orientation.name,
             "overlay": session.overlay(),
             "ply": ply_payload(ply),
-            "instruction": instruction(ply),
+            "instruction": instruction(ply, is_final_ply),
+            "is_final_ply": is_final_ply,
+            "game_complete": game_complete,
             "board_svg": render_board_svg(ply.fen, ply.uci, session.view),
             "captures": session.captures,
-            "captured_plies": sorted({c["ply_index"] for c in session.captures}),
+            "captured_plies": captured_plies,
         }
 
     @app.get("/", response_class=HTMLResponse)

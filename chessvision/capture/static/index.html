@@ -85,6 +85,18 @@
            background: #000a; border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px;
            opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; }
   .toast.show { opacity: 1; }
+
+  .result-chip { display: none; font-weight: 700; padding: 4px 10px; border-radius: 999px;
+                 border: 1px solid var(--line); background: #262b34; color: var(--fg);
+                 font-variant-numeric: tabular-nums; }
+  .result-chip.show { display: inline-flex; gap: 6px; align-items: center; }
+  .result-chip.win-white { background: #f5f5f5; color: #15171c; border-color: #f5f5f5; }
+  .result-chip.win-black { background: #1a1a1a; color: #f5f5f5; border-color: #3a3a3a; }
+  .result-chip.draw { background: #3a3f4a; color: var(--fg); border-color: #3a3f4a; }
+
+  .instruction.complete { color: #06210f; background: var(--good); border-radius: 10px;
+                          padding: 10px 14px; font-weight: 700; }
+  .instruction.complete .move-label { color: #06210f; }
 </style>
 </head>
 <body>
@@ -93,6 +105,7 @@
     <select id="gameSelect" title="Game"></select>
     <button id="startBtn">Start</button>
     <span class="spacer"></span>
+    <span class="result-chip" id="resultChip"></span>
     <span class="progress" id="progress">—</span>
   </header>
 
@@ -349,6 +362,26 @@ function drawOverlay() {
   const r = containRect(v.videoWidth, v.videoHeight, c.width, c.height);
   const lat = state.overlay.lattice;
   const P = (k) => toDisplay(lat[k][0], lat[k][1], r);
+  // Move highlight: from/to squares of the current ply, drawn under grid+dots
+  // so the lattice and piece markers stay readable on top.
+  const mv = state.overlay.move;
+  if (mv) {
+    const fillSquare = (quad) => {
+      ctx.beginPath();
+      quad.forEach(([qx, qy], k) => {
+        const [px, py] = toDisplay(qx, qy, r);
+        k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      });
+      ctx.closePath();
+      ctx.fillStyle = "rgba(255,206,38,.42)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,206,38,.95)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    };
+    fillSquare(mv.from.quad);
+    fillSquare(mv.to.quad);
+  }
   ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(79,140,255,.55)";
   for (let row = 0; row < 9; row++) {
     ctx.beginPath();
@@ -420,8 +453,21 @@ function render() {
   if (!state) return;
   $("board").innerHTML = state.board_svg;
   const ply = state.ply;
-  $("instruction").innerHTML = state.instruction.replace(ply.move_label, `<span class="move-label">${ply.move_label}</span>`);
-  $("progress").textContent = `${state.game.white} – ${state.game.black}  ·  ply ${state.ply_index}/${state.n_plies - 1}`;
+  const instr = $("instruction");
+  if (state.game_complete) {
+    const label = state.game.result_label || "Game over";
+    instr.classList.add("complete");
+    instr.textContent = `🏁 Game complete · ${state.game.result} — ${label}.`;
+  } else {
+    instr.classList.remove("complete");
+    instr.innerHTML = state.instruction.replace(
+      ply.move_label, `<span class="move-label">${ply.move_label}</span>`
+    );
+  }
+  $("progress").textContent = state.game_complete
+    ? `${state.game.white} – ${state.game.black}  ·  ${state.captures.length}/${state.n_plies} snapped`
+    : `${state.game.white} – ${state.game.black}  ·  ply ${state.ply_index}/${state.n_plies - 1}`;
+  renderResultChip();
   $("prevBtn").disabled = state.ply_index <= 0;
   $("nextBtn").disabled = state.ply_index >= state.n_plies - 1;
   const done = state.captured_plies.includes(state.ply_index);
@@ -429,9 +475,20 @@ function render() {
   renderReview();
   updateButtons();
 }
+function renderResultChip() {
+  const chip = $("resultChip");
+  if (!state || !state.game_complete) { chip.classList.remove("show"); return; }
+  const r = state.game.result;
+  chip.className = "result-chip show " + (
+    r === "1-0" ? "win-white" : r === "0-1" ? "win-black" : r === "1/2-1/2" ? "draw" : ""
+  );
+  chip.textContent = state.game.result_label ? `${r} · ${state.game.result_label}` : r;
+}
 function updateButtons() {
   const live = !!(state && stream);
-  $("snapBtn").disabled = !live || cornerMode;
+  const complete = !!(state && state.game_complete);
+  $("snapBtn").disabled = !live || cornerMode || complete;
+  $("snapBtn").textContent = complete ? "Game complete ✓" : "Snap ⏎";
   $("flipBtn").disabled = !state;
   $("markBtn").disabled = !live;
   $("markBtn").textContent = state && state.corners ? "Redo corners" : "Mark corners";
