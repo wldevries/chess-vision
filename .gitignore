@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# uv / virtualenv
+.venv/
+
+# Trained model weights (track via DVC/releases, not git)
+models/*.pt
+models/*.pth
+models/*.onnx
+
+# Self-check / experiment outputs
+runs/
+
+# Local environment config
+.env
+
+# OS / editor
+.DS_Store
+*.swp
+data/

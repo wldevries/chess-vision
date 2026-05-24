@@ -1,0 +1,47 @@
+[project]
+name = "chessvision"
+version = "0.1.0"
+description = "Read a chess position from a photo and output FEN, generalizing across boards, piece sets, and environments."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Wouter de Vries" }]
+
+# Pins use upper bounds on volatile deps (see plan.md §8). Exact versions are
+# locked in uv.lock; the bounds here guard against breaking majors:
+#   - numpy<2  : NumPy 2.x breaks against the OpenCV/torch builds we use.
+#   - torch/torchvision are kept as a compatible pair by the resolver.
+dependencies = [
+    "numpy>=1.26,<2",
+    "opencv-python>=4.9,<4.12",
+    "pillow>=10.3,<12",
+    "torch>=2.2,<2.9",
+    "torchvision>=0.17,<0.24",
+]
+
+[project.scripts]
+chessvision = "chessvision.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2,<9",
+    "ruff>=0.6,<0.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["chessvision"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
