@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,12 @@ def dataset() -> CaptureDataset:
 
 
 def test_loads_all_tasks(dataset: CaptureDataset):
-    assert len(dataset) == 169
+    # The export grows as more photos are labelled; assert we parse every
+    # annotated task rather than hardcoding a count.
+    raw = json.loads(EXPORT.read_text(encoding="utf-8"))
+    annotated = sum(1 for t in raw if t.get("annotations"))
+    assert len(dataset) == annotated
+    assert len(dataset) >= 169  # never regress below the first labelled batch
 
 
 def test_every_sample_has_four_corners(dataset: CaptureDataset):

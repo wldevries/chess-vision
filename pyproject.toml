@@ -10,8 +10,10 @@ authors = [{ name = "Wouter de Vries" }]
 
 # Pins use upper bounds on volatile deps (see plan.md §8). Exact versions are
 # locked in uv.lock; the bounds here guard against breaking majors:
-#   - numpy<2  : NumPy 2.x breaks against the OpenCV/torch builds we use.
-#   - torch/torchvision are kept as a compatible pair by the resolver.
+#   - numpy<2  : NumPy 2.x breaks against the OpenCV builds we use (keep this even
+#                though a manual `uv pip install torch` will try to pull numpy 2).
+#   - torch/torchvision come from the CUDA (cu128) index, see [tool.uv.sources]
+#     below; the resolver keeps them a compatible pair.
 dependencies = [
     "boto3>=1.34,<2",
     "chess>=1.10,<2",
@@ -20,15 +22,36 @@ dependencies = [
     "numpy>=1.26,<2",
     "opencv-python>=4.9,<4.12",
     "pillow>=10.3,<12",
+    "pycocotools>=2.0,<3",
     "python-dotenv>=1.0,<2",
     "python-multipart>=0.0.9,<1",
-    "torch>=2.2,<2.9",
-    "torchvision>=0.17,<0.24",
+    "torch>=2.8,<2.12",
+    "torchmetrics>=1.4,<2",
+    "torchvision>=0.23,<0.27",
     "uvicorn[standard]>=0.27,<1",
 ]
 
 [project.scripts]
 chessvision = "chessvision.cli:main"
+
+# Pull torch/torchvision from PyTorch's CUDA (cu128) wheel index so `uv run`
+# keeps the GPU build in the lock. Without this, the lock would resolve the
+# default CPU wheels from PyPI and every `uv run` would silently revert a
+# manually-installed CUDA torch back to CPU. `explicit = true` means *only* the
+# packages mapped in [tool.uv.sources] are taken from this index.
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+# cu128 wheels exist only for Windows and Linux (no macOS). Restrict the lock to
+# those platforms so the universal resolver doesn't fail hunting a macOS CUDA wheel.
+[tool.uv]
+environments = ["sys_platform == 'win32'", "sys_platform == 'linux'"]
 
 [dependency-groups]
 dev = [
