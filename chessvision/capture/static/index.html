@@ -43,12 +43,16 @@
   video, .layer { position: absolute; inset: 0; width: 100%; height: 100%; }
   video { object-fit: contain; display: block; }
   .layer { pointer-events: none; }
-  #cornerCanvas { pointer-events: auto; cursor: crosshair; display: none; }
-  #cornerCanvas.active { display: block; }
   .cam-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 20px; }
-  .corner-banner { position: absolute; left: 0; right: 0; top: 0; padding: 8px 12px; background: rgba(0,0,0,.7);
-                   display: none; gap: 10px; align-items: center; z-index: 3; font-size: 14px; }
-  .corner-banner.show { display: flex; }
+
+  .corner-modal { position: fixed; inset: 0; background: #000; display: none; z-index: 40; flex-direction: column; }
+  .corner-modal.show { display: flex; }
+  .corner-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+                    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .corner-toolbar .hint { flex: 1; min-width: 200px; color: var(--fg); font-size: 14px; }
+  .corner-canvas-area { flex: 1; position: relative; min-height: 0; }
+  #cornerCanvas { position: absolute; inset: 0; width: 100%; height: 100%;
+                  cursor: crosshair; touch-action: none; }
   .cam-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
   .cam-row.grow > select { flex: 1; max-width: none; }
 
@@ -107,12 +111,6 @@
       <div class="camera-wrap">
         <video id="video" autoplay playsinline muted></video>
         <canvas id="overlayCanvas" class="layer"></canvas>
-        <canvas id="cornerCanvas" class="layer"></canvas>
-        <div class="corner-banner" id="cornerBanner">
-          <span id="cornerHint">Tap the 4 board corners.</span>
-          <button id="undoCorner">Undo</button>
-          <button id="cancelCorner">Cancel</button>
-        </div>
         <div class="cam-empty" id="camEmpty">Grant camera access and pick your board-facing camera.</div>
       </div>
       <div class="snapbar">
@@ -137,6 +135,19 @@
   </footer>
 
   <div class="modal" id="modal"><button class="close" id="modalClose">×</button><img id="modalImg" alt="" /></div>
+
+  <div class="corner-modal" id="cornerModal">
+    <div class="corner-toolbar">
+      <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
+      <button id="undoCorner">Undo</button>
+      <button id="cancelCorner">Cancel</button>
+      <button id="saveCorner" class="primary" disabled>Save</button>
+    </div>
+    <div class="corner-canvas-area">
+      <canvas id="cornerCanvas"></canvas>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
   <canvas id="canvas" hidden></canvas>
 
@@ -159,6 +170,7 @@ let stream = null;       // active MediaStream
 let cornerMode = false;  // marking corners?
 let cornerPts = [];      // clicked points (native video px), order TL,TR,BR,BL
 let frozen = null;       // offscreen canvas: the frame being marked
+let dragging = null;     // index of corner being dragged, or null
 
 /* ---------- coordinate mapping for object-fit: contain ---------- */
 function containRect(vw, vh, cw, ch) {
@@ -219,27 +231,60 @@ function enterCornerMode() {
   frozen = document.createElement("canvas");
   frozen.width = v.videoWidth; frozen.height = v.videoHeight;
   frozen.getContext("2d").drawImage(v, 0, 0);
-  cornerPts = []; cornerMode = true;
-  $("cornerCanvas").classList.add("active");
-  $("cornerBanner").classList.add("show");
-  redrawCorners();
+  cornerPts = []; cornerMode = true; dragging = null;
+  $("cornerModal").classList.add("show");
+  requestAnimationFrame(redrawCorners);
 }
 function cancelCornerMode() {
-  cornerMode = false; cornerPts = []; frozen = null;
-  $("cornerCanvas").classList.remove("active");
-  $("cornerBanner").classList.remove("show");
+  cornerMode = false; cornerPts = []; frozen = null; dragging = null;
+  $("cornerModal").classList.remove("show");
+  updateButtons();
 }
-function cornerCanvasClick(ev) {
-  if (!cornerMode || cornerPts.length >= 4) return;
+function cornerDisplayRect() {
+  const c = $("cornerCanvas");
+  return containRect(frozen.width, frozen.height, c.clientWidth, c.clientHeight);
+}
+function pointerToNative(ev) {
   const c = $("cornerCanvas"), rect = c.getBoundingClientRect();
-  const r = containRect(frozen.width, frozen.height, c.clientWidth, c.clientHeight);
+  const r = cornerDisplayRect();
   let [nx, ny] = toNative(ev.clientX - rect.left, ev.clientY - rect.top, r);
-  nx = Math.max(0, Math.min(frozen.width, nx)); ny = Math.max(0, Math.min(frozen.height, ny));
-  cornerPts.push([nx, ny]);
+  return [Math.max(0, Math.min(frozen.width, nx)), Math.max(0, Math.min(frozen.height, ny))];
+}
+function hitTestCorner(ev) {
+  const c = $("cornerCanvas"), rect = c.getBoundingClientRect();
+  const r = cornerDisplayRect();
+  const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+  const HIT = 24; // generous touch target in display px
+  let bestI = -1, bestD = HIT * HIT;
+  cornerPts.forEach(([x, y], i) => {
+    const [dx, dy] = toDisplay(x, y, r);
+    const d = (dx - px) ** 2 + (dy - py) ** 2;
+    if (d < bestD) { bestD = d; bestI = i; }
+  });
+  return bestI;
+}
+function cornerPointerDown(ev) {
+  if (!cornerMode) return;
+  ev.preventDefault();
+  $("cornerCanvas").setPointerCapture(ev.pointerId);
+  const hit = hitTestCorner(ev);
+  if (hit >= 0) { dragging = hit; return; }
+  if (cornerPts.length < 4) {
+    cornerPts.push(pointerToNative(ev));
+    dragging = cornerPts.length - 1;
+    redrawCorners();
+  }
+}
+function cornerPointerMove(ev) {
+  if (!cornerMode || dragging === null) return;
+  cornerPts[dragging] = pointerToNative(ev);
   redrawCorners();
-  if (cornerPts.length === 4) saveCorners();
+}
+function cornerPointerUp(ev) {
+  if (dragging !== null) { dragging = null; redrawCorners(); }
 }
 const CORNER_LABELS = ["TL", "TR", "BR", "BL"];
+const CORNER_NAMES = ["top-left", "top-right", "bottom-right", "bottom-left"];
 function redrawCorners() {
   const c = $("cornerCanvas");
   c.width = c.clientWidth; c.height = c.clientHeight;
@@ -256,15 +301,16 @@ function redrawCorners() {
   ctx.stroke();
   cornerPts.forEach(([x, y], i) => {
     const [dx, dy] = toDisplay(x, y, r);
-    ctx.beginPath(); ctx.arc(dx, dy, 6, 0, 7); ctx.fill();
-    ctx.fillText(CORNER_LABELS[i], dx + 9, dy - 9);
+    ctx.beginPath(); ctx.arc(dx, dy, 8, 0, 7); ctx.fill();
+    ctx.fillText(CORNER_LABELS[i], dx + 11, dy - 11);
   });
   $("cornerHint").textContent = cornerPts.length < 4
-    ? `Tap the board corner: ${CORNER_LABELS[cornerPts.length]} ` +
-      `(${["top-left", "top-right", "bottom-right", "bottom-left"][cornerPts.length]})`
-    : "Saving…";
+    ? `Tap the ${CORNER_NAMES[cornerPts.length]} corner (${CORNER_LABELS[cornerPts.length]}). Drag any marker to adjust.`
+    : "All 4 placed. Drag any marker to refine, then press Save.";
+  $("saveCorner").disabled = cornerPts.length !== 4;
 }
 async function saveCorners() {
+  if (cornerPts.length !== 4) return;
   const [tl, tr, br, bl] = cornerPts;
   try {
     state = await postJson(`/api/session/${state.session_id}/corners`, {
@@ -426,15 +472,26 @@ $("markBtn").onclick = enterCornerMode;
 $("rotateBtn").onclick = rotateGrid;
 $("refreshCams").onclick = listCameras;
 $("cameraSelect").onchange = (e) => onCameraChange(e.target.value).catch((err) => toast(err.message));
-$("cornerCanvas").onclick = cornerCanvasClick;
+$("cornerCanvas").addEventListener("pointerdown", cornerPointerDown);
+$("cornerCanvas").addEventListener("pointermove", cornerPointerMove);
+$("cornerCanvas").addEventListener("pointerup", cornerPointerUp);
+$("cornerCanvas").addEventListener("pointercancel", cornerPointerUp);
+$("cornerModal").addEventListener("contextmenu", (e) => e.preventDefault());
 $("undoCorner").onclick = () => { if (cornerPts.length) { cornerPts.pop(); redrawCorners(); } };
 $("cancelCorner").onclick = cancelCornerMode;
+$("saveCorner").onclick = () => saveCorners().catch((e) => toast(e.message));
+window.addEventListener("resize", () => { if (cornerMode && frozen) redrawCorners(); });
 $("modalClose").onclick = () => $("modal").classList.remove("show");
 $("modal").onclick = (e) => { if (e.target.id === "modal") $("modal").classList.remove("show"); };
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "SELECT") return;
-  if (cornerMode && e.code === "Escape") cancelCornerMode();
-  else if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); snap(); }
+  if (cornerMode) {
+    if (e.code === "Escape") cancelCornerMode();
+    else if (e.code === "Enter" && cornerPts.length === 4) { e.preventDefault(); saveCorners().catch((err) => toast(err.message)); }
+    else if (e.code === "Backspace" && cornerPts.length) { e.preventDefault(); cornerPts.pop(); redrawCorners(); }
+    return;
+  }
+  if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); snap(); }
   else if (e.code === "ArrowLeft") goto(state.ply_index - 1);
   else if (e.code === "ArrowRight") goto(state.ply_index + 1);
 });
