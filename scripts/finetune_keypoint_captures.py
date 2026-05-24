@@ -28,10 +28,11 @@ from chessvision.data.capture_detection import CaptureKeypointConfig, split_by_s
 from chessvision.data.captures import CaptureDataset
 from chessvision.data.detection import collate_detection
 from chessvision.keypoint_detector import (
-    freeze_for_finetune,
+    FINETUNE_SCOPES,
     graft_from_detector_checkpoint,
     load_keypoint_detector,
     save_keypoint_checkpoint,
+    set_finetune_scope,
     trainable_parameters,
 )
 
@@ -49,9 +50,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--keypoint-ckpt", type=Path, default=Path("runs/keypoint/best.pt"))
     add("--detector-ckpt", type=Path, default=Path("runs/detector/best.pt"))
     add("--val-sessions", default=DEFAULT_VAL_SESSIONS, help="comma-separated held-out sessions")
-    add("--epochs", type=int, default=12)
+    add("--unfreeze", choices=FINETUNE_SCOPES, default="classifier", help="how much to adapt")
+    add("--epochs", type=int, default=5)
     add("--batch-size", type=int, default=2)
-    add("--lr", type=float, default=0.005)
+    add("--lr", type=float, default=5e-4)
     add("--momentum", type=float, default=0.9)
     add("--weight-decay", type=float, default=1e-4)
     add("--max-size", type=int, default=1333)
@@ -126,7 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     model = load_model(args, device)
-    freeze_for_finetune(model)
+    set_finetune_scope(model, args.unfreeze)
+    n_train = sum(p.numel() for p in trainable_parameters(model))
+    print(f"unfreeze={args.unfreeze} | trainable params {n_train:,}")
     optimizer = torch.optim.SGD(
         trainable_parameters(model),
         lr=args.lr,

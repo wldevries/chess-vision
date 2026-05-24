@@ -88,24 +88,55 @@ def freeze_trunk(model: torch.nn.Module) -> torch.nn.Module:
     return model
 
 
-def freeze_for_finetune(model: torch.nn.Module) -> torch.nn.Module:
-    """Domain fine-tune freezing: train the box **classifier/regressor head** AND the
-    keypoint branch, keep the backbone + FPN + RPN frozen. The capture set's real gap
-    is piece *classification* on the user's own pieces (glass/wood), not localization
-    (the trunk already localizes well and the contact geometry is exact), so we give
-    the class head the capacity to adapt while the tiny low-diversity set can't corrupt
-    the shared trunk. Mirrors `freeze_trunk` but also unfreezes `roi_heads.box_predictor`.
+FINETUNE_SCOPES = ("classifier", "heads", "rpn", "backbone")
+
+
+def _unfreeze(*modules: torch.nn.Module) -> None:
+    for m in modules:
+        for p in m.parameters():
+            p.requires_grad_(True)
+
+
+def set_finetune_scope(model: torch.nn.Module, scope: str = "classifier") -> torch.nn.Module:
+    """Freeze everything, then unfreeze a nested scope (each level adds to the previous).
+
+    The capture set is tiny and low-diversity (two boards), so the safest useful change
+    is to adapt only what's actually wrong. The pretrained keypoint head already places
+    contact points well (it gave the localization baseline) and the box regressor is
+    well-calibrated from ChessReD -- retraining them on RoIs derived from *synthesized*
+    boxes drifts them and the held-out numbers collapse (observed). So the levels are:
+
+    - ``classifier``: ONLY ``roi_heads.box_predictor.cls_score`` -- adapt piece
+      appearance -> class. Keypoint head + box regressor stay frozen, so localization is
+      preserved and only class accuracy can move. The safe default.
+    - ``heads``: + ``box_predictor.bbox_pred`` + the keypoint head/predictor.
+    - ``rpn``: + the RPN, so region *proposals* can adapt to the user's pieces (raises the
+      localization ceiling, at higher overfit risk).
+    - ``backbone``: + the upper backbone (``body.layer3``/``layer4``) and FPN; the lower,
+      generic layers stay frozen. Most adaptive, most overfit-prone -- use a low LR.
     """
+    if scope not in FINETUNE_SCOPES:
+        raise ValueError(f"scope must be one of {FINETUNE_SCOPES}, got {scope!r}")
     for p in model.parameters():
         p.requires_grad_(False)
-    for module in (
-        model.roi_heads.box_predictor,
-        model.roi_heads.keypoint_head,
-        model.roi_heads.keypoint_predictor,
-    ):
-        for p in module.parameters():
-            p.requires_grad_(True)
+
+    _unfreeze(model.roi_heads.box_predictor.cls_score)
+    if scope in ("heads", "rpn", "backbone"):
+        _unfreeze(
+            model.roi_heads.box_predictor.bbox_pred,
+            model.roi_heads.keypoint_head,
+            model.roi_heads.keypoint_predictor,
+        )
+    if scope in ("rpn", "backbone"):
+        _unfreeze(model.rpn)
+    if scope == "backbone":
+        _unfreeze(model.backbone.body.layer3, model.backbone.body.layer4, model.backbone.fpn)
     return model
+
+
+def freeze_for_finetune(model: torch.nn.Module) -> torch.nn.Module:
+    """Back-compat: the ``heads`` scope (box predictor + keypoint branch)."""
+    return set_finetune_scope(model, "heads")
 
 
 def keypoint_parameters(model: torch.nn.Module) -> list[torch.nn.Parameter]:
