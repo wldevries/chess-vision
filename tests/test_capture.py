@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import chess
@@ -115,18 +116,78 @@ def test_api_lists_games_and_runs_a_snap_cycle(client: TestClient, tmp_path: Pat
     assert (session_dir / "captures.jsonl").read_text(encoding="utf-8").strip()
 
 
-def test_api_goto_clamps_and_flip_toggles_orientation(client: TestClient) -> None:
+def _new_session(client: TestClient) -> str:
     game_id = client.get("/api/games").json()[0]["game_id"]
-    sid = client.post("/api/session", data={"game_id": game_id}).json()["session_id"]
+    return client.post("/api/session", data={"game_id": game_id}).json()["session_id"]
+
+
+def test_api_goto_clamps_and_view_flips(client: TestClient) -> None:
+    sid = _new_session(client)
 
     # goto past the end clamps to the last ply.
     state = client.post(f"/api/session/{sid}/goto", data={"ply_index": 9999}).json()
     assert state["ply_index"] == state["n_plies"] - 1
 
-    state = client.post(f"/api/session/{sid}/orientation", data={"orientation": "black"}).json()
-    assert state["orientation"] == "black"
-    bad = client.post(f"/api/session/{sid}/orientation", data={"orientation": "sideways"})
-    assert bad.status_code == 400
+    state = client.post(f"/api/session/{sid}/view", data={"view": "black"}).json()
+    assert state["view"] == "black"
+    assert client.post(f"/api/session/{sid}/view", data={"view": "sideways"}).status_code == 400
+
+
+def test_api_orientation_takes_rotation_values(client: TestClient) -> None:
+    sid = _new_session(client)
+    state = client.post(f"/api/session/{sid}/orientation", data={"orientation": "R90"}).json()
+    assert state["orientation"] == "R90"
+    assert (
+        client.post(f"/api/session/{sid}/orientation", data={"orientation": "x"}).status_code == 400
+    )
+
+
+# A clean 800x800 board square: canonical (u, v) -> (100 + u*800, 100 + v*800) under R0.
+SQUARE_CORNERS = {
+    "top_left": [100, 100],
+    "top_right": [900, 100],
+    "bottom_right": [900, 900],
+    "bottom_left": [100, 900],
+}
+
+
+def test_corners_produce_overlay_with_piece_base_points(client: TestClient) -> None:
+    sid = _new_session(client)
+    assert client.get(f"/api/session/{sid}").json()["overlay"] is None
+
+    state = client.post(
+        f"/api/session/{sid}/corners", json={**SQUARE_CORNERS, "orientation": "R0"}
+    ).json()
+    assert state["corners"]["top_left"] == [100, 100]
+    overlay = state["overlay"]
+    assert len(overlay["lattice"]) == 81
+    assert len(overlay["pieces"]) == 32  # full starting position
+
+    a8 = next(p for p in overlay["pieces"] if p["square"] == "a8")
+    assert a8["piece"] == "r" and a8["color"] == "b"
+    # a8 center -> (100 + 0.0625*800,) twice = (150, 150).
+    assert a8["base"] == pytest.approx([150.0, 150.0], abs=0.5)
+
+    cleared = client.request("DELETE", f"/api/session/{sid}/corners").json()
+    assert cleared["corners"] is None and cleared["overlay"] is None
+
+
+def test_snap_records_corners_and_guesstimated_pieces(client: TestClient, tmp_path: Path) -> None:
+    sid = _new_session(client)
+    client.post(f"/api/session/{sid}/corners", json={**SQUARE_CORNERS, "orientation": "R0"})
+
+    state = client.post(
+        f"/api/session/{sid}/snap", files={"image": ("f.jpg", b"x", "image/jpeg")}
+    ).json()
+    cap = state["captures"][0]
+    assert cap["corners"]["top_left"] == [100, 100]
+    assert cap["orientation"] == "R0"
+    assert len(cap["pieces"]) == 32
+    # The JSONL row carries the same weak labels for offline use.
+    row = json.loads(
+        (tmp_path / sid / "captures.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert row["fen"] == cap["fen"] and len(row["pieces"]) == 32
 
 
 def test_api_delete_capture_removes_file_and_row(client: TestClient, tmp_path: Path) -> None:

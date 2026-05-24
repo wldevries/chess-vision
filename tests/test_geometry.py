@@ -62,8 +62,7 @@ def test_orientation_places_a8(orientation):
 
     expected_key = ORIENTATION_TO_KEYS[orientation][0]
     dists = {
-        k: float(np.hypot(img_pt[0] - v[0], img_pt[1] - v[1]))
-        for k, v in SYNTH_CORNERS.items()
+        k: float(np.hypot(img_pt[0] - v[0], img_pt[1] - v[1])) for k, v in SYNTH_CORNERS.items()
     }
     assert min(dists, key=dists.get) == expected_key
 

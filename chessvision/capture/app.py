@@ -17,22 +17,85 @@ from pathlib import Path
 
 import chess
 import chess.svg
+import numpy as np
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from chessvision.capture.games import Game, Ply
+from chessvision.geometry import (
+    Orientation,
+    canonical_to_image,
+    compute_homography,
+    lattice_points,
+    square_center_uv,
+    square_polygons,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+CornerDict = dict[str, list[float]]
 
-def render_board_svg(fen: str, lastmove_uci: str | None, orientation: str, size: int = 480) -> str:
+
+class CornersIn(BaseModel):
+    """The four board corners as image pixels (native camera resolution),
+    in the visual order top-left, top-right, bottom-right, bottom-left."""
+
+    top_left: tuple[float, float]
+    top_right: tuple[float, float]
+    bottom_right: tuple[float, float]
+    bottom_left: tuple[float, float]
+    orientation: str | None = None  # R0/R90/R180/R270; defaults to the session's
+
+    def as_dict(self) -> CornerDict:
+        return {
+            "top_left": list(self.top_left),
+            "top_right": list(self.top_right),
+            "bottom_right": list(self.bottom_right),
+            "bottom_left": list(self.bottom_left),
+        }
+
+
+def render_board_svg(fen: str, lastmove_uci: str | None, view: str, size: int = 480) -> str:
     board = chess.Board(fen)
     lastmove = chess.Move.from_uci(lastmove_uci) if lastmove_uci else None
-    orient = chess.WHITE if orientation == "white" else chess.BLACK
+    orient = chess.WHITE if view == "white" else chess.BLACK
     return chess.svg.board(
         board, lastmove=lastmove, orientation=orient, size=size, coordinates=True
     )
+
+
+def _round_pts(pts: np.ndarray) -> list[list[float]]:
+    return [[round(float(x), 1), round(float(y), 1)] for x, y in pts]
+
+
+def compute_overlay(corners: CornerDict, orientation: Orientation, fen: str) -> dict:
+    """Project the board grid and the FEN's occupied squares into the image.
+
+    With fixed corners, every square's image location is known, so the known FEN
+    gives a guesstimated base point (square center) and footprint quad for each
+    piece -- a weak label and a live alignment check, no detector needed.
+    """
+    homography = compute_homography(corners, orientation)
+    polys = square_polygons(homography)
+    board = chess.Board(fen)
+
+    pieces: list[dict] = []
+    for square_index, piece in board.piece_map().items():
+        name = chess.square_name(square_index)
+        u, v = square_center_uv(name)
+        base = canonical_to_image(homography, np.array([[u, v]], dtype=np.float32))[0]
+        pieces.append(
+            {
+                "square": name,
+                "piece": piece.symbol(),  # 'P'/'n'/... (case = colour)
+                "color": "w" if piece.color == chess.WHITE else "b",
+                "base": [round(float(base[0]), 1), round(float(base[1]), 1)],
+                "quad": _round_pts(polys[name]),
+            }
+        )
+    return {"lattice": _round_pts(lattice_points(homography)), "pieces": pieces}
 
 
 @dataclass
@@ -41,7 +104,9 @@ class Session:
     game: Game
     out_dir: Path
     ply_index: int = 0
-    orientation: str = "white"  # which side is at the bottom of the displayed board
+    view: str = "white"  # cosmetic: which side is at the bottom of the SVG board
+    corners: CornerDict | None = None  # image-pixel board corners, fixed for the session
+    orientation: Orientation = Orientation.R0  # which canonical anchor maps to which corner
     captures: list[dict] = field(default_factory=list)
 
     @property
@@ -50,6 +115,11 @@ class Session:
 
     def clamp(self, index: int) -> int:
         return max(0, min(index, self.game.n_plies - 1))
+
+    def overlay(self) -> dict | None:
+        if self.corners is None:
+            return None
+        return compute_overlay(self.corners, self.orientation, self.game.plies[self.ply_index].fen)
 
 
 def _now_iso() -> str:
@@ -103,10 +173,13 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
             },
             "ply_index": session.ply_index,
             "n_plies": session.game.n_plies,
-            "orientation": session.orientation,
+            "view": session.view,
+            "corners": session.corners,
+            "orientation": session.orientation.name,
+            "overlay": session.overlay(),
             "ply": ply_payload(ply),
             "instruction": instruction(ply),
-            "board_svg": render_board_svg(ply.fen, ply.uci, session.orientation),
+            "board_svg": render_board_svg(ply.fen, ply.uci, session.view),
             "captures": session.captures,
             "captured_plies": sorted({c["ply_index"] for c in session.captures}),
         }
@@ -170,12 +243,38 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
         session.ply_index = session.clamp(ply_index)
         return state_payload(session)
 
+    @app.post("/api/session/{session_id}/view")
+    def set_view(session_id: str, view: str = Form(...)) -> dict:
+        session = get_session(session_id)
+        if view not in ("white", "black"):
+            raise HTTPException(400, "view must be 'white' or 'black'")
+        session.view = view
+        return state_payload(session)
+
     @app.post("/api/session/{session_id}/orientation")
     def set_orientation(session_id: str, orientation: str = Form(...)) -> dict:
         session = get_session(session_id)
-        if orientation not in ("white", "black"):
-            raise HTTPException(400, "orientation must be 'white' or 'black'")
-        session.orientation = orientation
+        try:
+            session.orientation = Orientation[orientation]
+        except KeyError as exc:
+            raise HTTPException(400, "orientation must be one of R0/R90/R180/R270") from exc
+        return state_payload(session)
+
+    @app.post("/api/session/{session_id}/corners")
+    def set_corners(session_id: str, body: CornersIn) -> dict:
+        session = get_session(session_id)
+        if body.orientation is not None:
+            try:
+                session.orientation = Orientation[body.orientation]
+            except KeyError as exc:
+                raise HTTPException(400, "orientation must be one of R0/R90/R180/R270") from exc
+        session.corners = body.as_dict()
+        return state_payload(session)
+
+    @app.delete("/api/session/{session_id}/corners")
+    def clear_corners(session_id: str) -> dict:
+        session = get_session(session_id)
+        session.corners = None
         return state_payload(session)
 
     @app.post("/api/session/{session_id}/snap")
@@ -190,6 +289,7 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
         filename = f"{session.game.game_id}_ply{ply.index:03d}_{stamp}.jpg"
         (session.out_dir / filename).write_bytes(data)
 
+        overlay = session.overlay()
         record = {
             "filename": filename,
             "url": f"/captures/{session.session_id}/{filename}",
@@ -209,7 +309,11 @@ def create_app(games: list[Game], out_root: Path) -> FastAPI:
             "to": ply.to_square,
             "fen": ply.fen,
             "move_label": ply.move_label,
-            "board_orientation": session.orientation,
+            "view": session.view,
+            # Geometry weak-labels: fixed corners + the FEN's piece base points.
+            "corners": session.corners,
+            "orientation": session.orientation.name,
+            "pieces": overlay["pieces"] if overlay else None,
             "bytes": len(data),
         }
         with session.jsonl_path.open("a", encoding="utf-8") as fh:

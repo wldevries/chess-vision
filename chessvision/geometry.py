@@ -100,6 +100,18 @@ def uv_to_square(u: float, v: float, tol: float = 0.0) -> str | None:
     return f"{FILES[file_idx]}{rank}"
 
 
+def square_center_uv(square: str) -> tuple[float, float]:
+    """Canonical (u, v) of a square's center, e.g. "e4" -> (0.5625, 0.5625).
+
+    The inverse of `uv_to_square` at square granularity: where a piece standing
+    on `square` is expected to meet the board. Project it through a homography to
+    get the piece's approximate base point in the image.
+    """
+    file_idx = FILES.index(square[0])
+    rank = int(square[1])
+    return ((file_idx + 0.5) / 8.0, (8.5 - rank) / 8.0)
+
+
 def square_for_point(homography: np.ndarray, pt: Point, tol: float = 0.0) -> str | None:
     """Map a single image point to its algebraic square (None if off-board)."""
     u, v = image_to_canonical(homography, np.asarray([pt], dtype=np.float32))[0]
@@ -125,9 +137,7 @@ def bbox_base_point(bbox: Sequence[float], vertical_offset: float = 0.0) -> tupl
 def lattice_points(homography: np.ndarray) -> np.ndarray:
     """The 9x9 = 81 grid-corner points projected into the image, shape (81, 2),
     ordered row-major by (v, u) so it reshapes to (9, 9, 2) for drawing lines."""
-    coords = np.array(
-        [[i / 8.0, j / 8.0] for j in range(9) for i in range(9)], dtype=np.float32
-    )
+    coords = np.array([[i / 8.0, j / 8.0] for j in range(9) for i in range(9)], dtype=np.float32)
     return canonical_to_image(homography, coords)
 
 

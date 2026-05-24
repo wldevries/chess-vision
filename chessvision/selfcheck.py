@@ -71,9 +71,7 @@ class SelfCheckReport:
 
 
 def _base_points(pieces: Sequence, vertical_offset: float) -> np.ndarray:
-    return np.array(
-        [bbox_base_point(p.bbox, vertical_offset) for p in pieces], dtype=np.float32
-    )
+    return np.array([bbox_base_point(p.bbox, vertical_offset) for p in pieces], dtype=np.float32)
 
 
 def _best_orientation(
@@ -161,9 +159,7 @@ def run(
     n_matched = sum(r.n_matched for r in scored)
     n_offboard = sum(r.n_offboard for r in scored)
     orient_counts = Counter(r.orientation.name for r in scored)
-    flagged = sorted(
-        (r for r in scored if r.accuracy < flag_threshold), key=lambda r: r.accuracy
-    )
+    flagged = sorted((r for r in scored if r.accuracy < flag_threshold), key=lambda r: r.accuracy)
     return SelfCheckReport(
         per_image=per_image,
         n_images=len(per_image),
