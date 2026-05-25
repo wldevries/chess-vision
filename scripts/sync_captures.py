@@ -40,8 +40,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "direction",
-        choices=["up", "down", "tasks"],
-        help="up: local->bucket, down: bucket->local, tasks: build LS pre-annotations->bucket",
+        choices=["up", "down", "tasks", "annotations"],
+        help=(
+            "up: local->bucket, down: bucket->local, tasks: build LS pre-annotations->bucket, "
+            "annotations: pull LS annotation exports->merged label-studio.json"
+        ),
     )
     p.add_argument("--local", type=Path, default=Path("data/captures"), help="local dataset dir")
     p.add_argument("--prefix", default="captures", help="key prefix within the bucket")
@@ -65,6 +68,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--with-boxes",
         action="store_true",
         help="also emit approximate piece bounding boxes (control 'boxes'); tasks command",
+    )
+    p.add_argument(
+        "--annotations-bucket",
+        default="chess-annotations",
+        help="bucket Label Studio export storage writes to (annotations command)",
+    )
+    p.add_argument(
+        "--out",
+        type=Path,
+        default=Path("data/captures/label-studio.json"),
+        help="merged export written by the annotations command",
     )
     return p.parse_args(argv)
 
@@ -112,6 +126,33 @@ def run_tasks(args, config, client) -> int:
     return 0
 
 
+def run_annotations(args, config, client) -> int:
+    """Pull every Label Studio annotation export from `--annotations-bucket` and
+    fold them into one merged `label-studio.json` that the training stack reads.
+
+    Export storage writes one object per annotation; we convert each to the
+    merged-export task shape, dedup re-labels (latest wins), and overwrite `--out`.
+    Images are not fetched — trainers load them from the local mirror or fall back
+    to S3, so run `down` separately if you want them on disk.
+    """
+    from chessvision.data.captures import build_export_from_annotations
+
+    bucket = args.annotations_bucket
+    print(f"reading annotation exports from {config.endpoint_url}/{bucket}")
+    paginator = client.get_paginator("list_objects_v2")
+    keys = [
+        obj["Key"] for page in paginator.paginate(Bucket=bucket) for obj in page.get("Contents", [])
+    ]
+    annotations = [json.loads(get_bytes(client, bucket, key)) for key in keys]
+    tasks = build_export_from_annotations(annotations)
+    print(f"{len(keys)} annotation objects -> {len(tasks)} deduped tasks")
+    if not args.dry_run:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(tasks), encoding="utf-8")
+    print(f"{'(dry-run) ' if args.dry_run else ''}wrote {args.out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     config = StorageConfig.from_env()
@@ -119,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.direction == "tasks":
         return run_tasks(args, config, client)
+    if args.direction == "annotations":
+        return run_annotations(args, config, client)
 
     where = f"{config.bucket}/{args.prefix.strip('/')}"
     if args.direction == "up":
