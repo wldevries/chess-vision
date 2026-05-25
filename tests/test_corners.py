@@ -110,16 +110,22 @@ def test_capture_pose_selection_dedups_and_holds_out():
     train, heldout = select_capture_corner_poses(CAPTURES_EXPORT, dedup_thr=0.02, max_per_pose=2)
     assert train and heldout
 
-    # Held-out sessions never leak into train (session-grouped split).
-    train_sessions = {s.session for s in train}
-    heldout_sessions = {s.session for s in heldout}
-    assert train_sessions.isdisjoint(heldout_sessions)
-
+    # The split is by corner *pose*, not by session: the unit is the orientation
+    # cluster, so a multi-pose session may appear on both sides (that's fine — the
+    # guarantee below is geometric, not per-session).
     # Anti-leak: no train pose sits within the dedup threshold of any held-out pose.
     ho_corners = [_norm_corners(s) for s in heldout]
     for s in train:
         c = _norm_corners(s)
         assert all(_corner_dist(c, h) > 0.02 for h in ho_corners)
+
+    # Per-board coverage: every board that contributes a held-out pose also has train
+    # poses (no board is eval-only), so each board is both learned and measured.
+    from chessvision.data.session_meta import SessionMetadata
+
+    meta = SessionMetadata.load(CAPTURES_EXPORT.parent)
+    board_of = lambda s: (meta.info(s.session) or {}).get("board") if meta else None  # noqa: E731
+    assert {board_of(s) for s in heldout} <= {board_of(s) for s in train}
 
     # max_per_pose is respected: clustering train corners at the threshold yields no
     # cluster larger than the cap (frames are deduped to distinct poses).

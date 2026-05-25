@@ -73,6 +73,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--no-captures", action="store_true", help="train on ChessReD only (ignore captures)")
     add("--dedup-thr", type=float, default=0.02, help="distinct-pose threshold (frac of img size)")
     add("--max-per-pose", type=int, default=2, help="frames kept per distinct corner pose")
+    add("--val-frac", type=float, default=0.25, help="share of each board's poses held out")
     return p.parse_args(argv)
 
 
@@ -97,7 +98,10 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
     capture_eval_ds = None
     if not args.no_captures and args.captures_export.exists():
         cap_train, cap_heldout = select_capture_corner_poses(
-            args.captures_export, dedup_thr=args.dedup_thr, max_per_pose=args.max_per_pose
+            args.captures_export,
+            dedup_thr=args.dedup_thr,
+            max_per_pose=args.max_per_pose,
+            val_frac=args.val_frac,
         )
         cap_train_ds = CaptureCorners(cap_train, train_cfg, train=True)
         capture_eval_ds = CaptureCorners(cap_heldout, eval_cfg, train=False)

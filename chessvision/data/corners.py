@@ -29,6 +29,7 @@ are free of game-level leakage and comparable across phases.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -222,9 +223,11 @@ class ChessReDCorners(_CornerDataset):
 # every frame would over-represent those ~10 geometries and bias the localizer's pose
 # prior, so we **dedup to distinct corner poses** and keep only a few frames per pose
 # (enough lighting/piece variety to learn the board, not enough to distort the prior).
-# See the warning in `chessvision.data.captures`: splits are grouped by *session*; here
-# the held-out capture-eval poses come from the sessions tagged "held-out" in
-# `sessions.json`, and an anti-leak check drops any train pose near a held-out one.
+# See the warning in `chessvision.data.captures`: splits must not leak near-duplicate
+# frames. The held-out capture-eval set is derived automatically (no manual tag): every
+# frame is clustered into a distinct corner *pose*, the pose-cluster is the atomic unit
+# of the split, and a deterministic share of each *board's* poses is held out. An
+# anti-leak pass still drops any train pose within `dedup_thr` of a held-out one.
 
 
 def _norm_corners(sample) -> np.ndarray:
@@ -267,24 +270,28 @@ def _sample_evenly(items: list, k: int) -> list:
     return [items[i] for i in idx]
 
 
-def _is_heldout(notes: str | None) -> bool:
-    return bool(notes) and "held-out" in notes.lower()
-
-
 def select_capture_corner_poses(
     export_path: str | Path,
     captures_root: str | Path | None = None,
     *,
     dedup_thr: float = 0.02,
     max_per_pose: int = 2,
+    val_frac: float = 0.25,
 ) -> tuple[list, list]:
-    """Pick deduped, distinct-corner-pose capture samples for corner training.
+    """Pick deduped, distinct-corner-pose capture samples for corner training, with the
+    train/held-out split derived automatically (no manual `sessions.json` tag).
 
-    Returns `(train_samples, heldout_samples)`. Held-out sessions are those tagged
-    "held-out" in `sessions.json` (one+ pose per physical board); the rest are train.
-    Each split is clustered to distinct poses (`dedup_thr`, fraction of image size) and
-    thinned to `max_per_pose` evenly-spaced frames per pose. Train poses within
-    `dedup_thr` of any held-out pose are dropped (anti-leak).
+    Returns `(train_samples, heldout_samples)`. Every frame with four corners is
+    clustered into a distinct corner *pose* by geometry (`dedup_thr`, a fraction of
+    image size); the **pose-cluster is the atomic unit of the split**, so an orientation
+    that recurs across sessions lands wholly on one side — leakage is impossible by
+    construction. Clusters are grouped by the session's **board** tag, and a
+    deterministic share (`val_frac`, at least one pose where a board has >= 2 of them) of
+    each board's poses is held out; the rest train. So every board with enough poses
+    appears in both train and eval. Each kept pose is thinned to `max_per_pose`
+    evenly-spaced frames (lighting/piece variety). A final anti-leak pass drops any train
+    pose within `dedup_thr` of a held-out one (greedy clustering can leave cross-cluster
+    near-neighbours). Sessions absent from the metadata group under "(untagged)".
     """
     from chessvision.data.captures import CaptureDataset
     from chessvision.data.session_meta import SessionMetadata
@@ -292,20 +299,39 @@ def select_capture_corner_poses(
     ds = CaptureDataset.load(export_path, captures_root)
     meta = SessionMetadata.load(ds.captures_root)
 
-    def heldout_session(session: str) -> bool:
+    def board_of(session: str) -> str:
         info = meta.info(session) if meta else None
-        return _is_heldout(info.get("notes") if info else None)
+        return (info or {}).get("board") or "(untagged)"
 
     with_corners = [s for s in ds.samples if s.has_all_corners]
-    heldout_pool = [s for s in with_corners if heldout_session(s.session)]
-    train_pool = [s for s in with_corners if not heldout_session(s.session)]
+    clusters = _cluster_by_corners(with_corners, dedup_thr)  # one pose per cluster
 
-    heldout_clusters = _cluster_by_corners(heldout_pool, dedup_thr)
+    # Group poses by board (majority board of a cluster; clusters are board-pure in
+    # practice), then hold out an evenly-spread share of each board's poses. Ordering is
+    # by a stable key (a cluster's smallest task id) so the split is reproducible.
+    by_board: dict[str, list[list]] = defaultdict(list)
+    for cl in clusters:
+        board = Counter(board_of(s.session) for s in cl).most_common(1)[0][0]
+        by_board[board].append(cl)
+
+    heldout_clusters: list[list] = []
+    for board_clusters in by_board.values():
+        pose_key = lambda i: min(s.task_id for s in board_clusters[i])  # noqa: E731,B023
+        order = sorted(range(len(board_clusters)), key=pose_key)
+        n = len(order)
+        n_val = 0 if n < 2 else min(n - 1, max(1, round(val_frac * n)))
+        val_idx = set(_sample_evenly(order, n_val)) if n_val else set()
+        heldout_clusters.extend(board_clusters[i] for i in val_idx)
+
+    heldout_ids = {id(cl) for cl in heldout_clusters}
     heldout_centroids = [_norm_corners(c[0]) for c in heldout_clusters]
-    train_clusters = _cluster_by_corners(train_pool, dedup_thr, exclude=heldout_centroids)
+    heldout = [s for cl in heldout_clusters for s in _sample_evenly(cl, max_per_pose)]
 
+    # Train = every non-held-out frame, re-clustered with the held-out poses excluded so
+    # no train pose sits within dedup_thr of a held-out one.
+    train_pool = [s for cl in clusters if id(cl) not in heldout_ids for s in cl]
+    train_clusters = _cluster_by_corners(train_pool, dedup_thr, exclude=heldout_centroids)
     train = [s for cluster in train_clusters for s in _sample_evenly(cluster, max_per_pose)]
-    heldout = [s for cluster in heldout_clusters for s in _sample_evenly(cluster, max_per_pose)]
     return train, heldout
 
 
