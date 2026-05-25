@@ -31,7 +31,7 @@ def _img_pt(uv: tuple[float, float]) -> tuple[float, float]:
     return float(x), float(y)
 
 
-def _sample(pieces: list[PieceKeypoint]) -> CaptureSample:
+def _sample(pieces: list[PieceKeypoint], box_sizes=None) -> CaptureSample:
     return CaptureSample(
         task_id=1,
         session="s",
@@ -41,6 +41,7 @@ def _sample(pieces: list[PieceKeypoint]) -> CaptureSample:
         height=800,
         corners=CORNERS,
         pieces=pieces,
+        box_sizes=box_sizes,
     )
 
 
@@ -67,6 +68,16 @@ def test_off_board_piece_dropped():
     off = _img_pt((1.6, 1.6))  # projected well outside the board
     boxes, labels, kpts = synthesize_piece_targets(_sample([PieceKeypoint("BlackRook", off)]))
     assert len(boxes) == 0 and len(labels) == 0 and len(kpts) == 0
+
+
+def test_box_sizes_override_used_for_height():
+    """A sample's resolved box_sizes (from session metadata) overrides PIECE_HEIGHT_SCALE."""
+    e4 = _img_pt((4.5 / 8.0, 4.5 / 8.0))
+    base = _sample([PieceKeypoint("WhitePawn", e4)])
+    tall = _sample([PieceKeypoint("WhitePawn", e4)], box_sizes={"p": (3.0, 0.3)})
+    b0, _, _ = synthesize_piece_targets(base, margin=0.0)
+    b1, _, _ = synthesize_piece_targets(tall, margin=0.0)
+    assert (b1[0, 3] - b1[0, 1]) > (b0[0, 3] - b0[0, 1])  # override -> taller box
 
 
 def test_margin_enlarges_box():

@@ -66,19 +66,29 @@ def synthesize_piece_targets(
     head's RoI crop has context around the piece -- and the contact point sits
     comfortably inside rather than on the bottom edge. Boxes are clipped to the
     image; the contact keypoint always stays inside its (clipped) box.
+
+    Per-piece height/radius come from the sample's resolved `box_sizes` (physical
+    mm / board square, via session metadata) when present; otherwise they fall back
+    to `PIECE_HEIGHT_SCALE` and `radius_squares`. This is what lets the same set on a
+    smaller-grid board get correctly larger boxes without retuning constants.
     """
     homography = compute_homography(sample.corners, orientation)
     w, h = sample.width, sample.height
+    sizes = sample.box_sizes or {}
     boxes, labels, kpts = [], [], []
     for kp in sample.pieces:
         if square_for_point(homography, kp.point) is None:
             continue  # off-board piece (resting beside the board) -> no square
+        fen = kp.fen.lower()
+        height_squares, piece_radius = sizes.get(
+            fen, (PIECE_HEIGHT_SCALE.get(fen, 1.0), radius_squares)
+        )
         x1, y1, x2, y2 = project_piece_box(
             homography,
             kp.point,
             (w, h),
-            height_squares=PIECE_HEIGHT_SCALE.get(kp.fen.lower(), 1.0),
-            radius_squares=radius_squares,
+            height_squares=height_squares,
+            radius_squares=piece_radius,
         )
         # Margin so the RoI crop has context (esp. below the base) and the contact
         # point is not pinned to an edge.

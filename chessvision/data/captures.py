@@ -47,7 +47,7 @@ import os
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 
@@ -205,6 +205,9 @@ class CaptureSample:
     # snake_case corner key -> (x, y) in image pixels; ready for geometry.compute_homography.
     corners: dict[str, tuple[float, float]]
     pieces: list[PieceKeypoint]
+    # Resolved per-piece box sizing from session metadata: fen-letter -> (height_squares,
+    # radius_squares). None/absent -> box synthesis falls back to PIECE_HEIGHT_SCALE.
+    box_sizes: dict[str, tuple[float, float]] | None = None
 
     @property
     def has_all_corners(self) -> bool:
@@ -248,6 +251,16 @@ class CaptureDataset:
         with export_path.open(encoding="utf-8") as fh:
             raw = json.load(fh)
         samples = [s for s in (cls._parse_task(t, captures_root) for t in raw) if s is not None]
+
+        # Attach per-piece box sizing from session metadata (sets/boards/sessions JSON),
+        # so box synthesis sizes pieces by physical mm/square instead of a global constant.
+        from chessvision.data.session_meta import SessionMetadata
+
+        meta = SessionMetadata.load(captures_root)
+        if meta is not None:
+            samples = [
+                replace(s, box_sizes=meta.piece_box_sizes(s.session) or None) for s in samples
+            ]
         return cls(export_path=export_path, captures_root=captures_root, samples=samples, s3=s3)
 
     @staticmethod
