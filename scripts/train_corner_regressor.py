@@ -55,6 +55,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--weight-decay", type=float, default=1e-4)
     add("--hflip", type=float, default=0.5, help="train horizontal-flip probability")
     add("--jitter", type=float, default=0.1, help="train brightness/contrast jitter magnitude")
+    # Colour aug -- attacks the board-colour shortcut (corners are geometric, not coloured).
+    add("--hue", type=float, default=0.05, help="HSV hue jitter, frac of full circle (0 off)")
+    add("--saturation", type=float, default=0.3, help="HSV saturation jitter magnitude (0 off)")
+    add("--grayscale-prob", type=float, default=0.2, help="prob. of dropping colour (0 off)")
+    # Geometric aug -- manufactures pose variety; auto-skips samples it would push off-frame.
+    add("--rotate", type=float, default=5.0, help="max abs rotation in degrees (0 off)")
+    add("--scale", type=float, default=0.1, help="scale jitter magnitude, e.g. 0.1 -> x[0.9,1.1]")
+    add("--perspective", type=float, default=0.04, help="perspective jitter, frac of size (0 off)")
     add("--workers", type=int, default=4, help="DataLoader workers (ignored when caching)")
     add(
         "--no-cache",
@@ -84,7 +92,16 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
     held-out capture poses (the honest 'works on your boards' number)."""
     cache = not args.no_cache
     train_cfg = CornerConfig(
-        image_size=args.image_size, hflip_prob=args.hflip, jitter=args.jitter, cache=cache
+        image_size=args.image_size,
+        hflip_prob=args.hflip,
+        jitter=args.jitter,
+        hue=args.hue,
+        saturation=args.saturation,
+        grayscale_prob=args.grayscale_prob,
+        rotate=args.rotate,
+        scale=args.scale,
+        perspective=args.perspective,
+        cache=cache,
     )
     eval_cfg = CornerConfig(image_size=args.image_size, cache=cache)
 
@@ -220,8 +237,11 @@ def main(argv: list[str] | None = None) -> int:
             if metrics["mean_corner_err"] < best_err:
                 best_err = metrics["mean_corner_err"]
                 save_corner_checkpoint(
-                    model, args.out_dir / "best.pt", image_size=args.image_size,
-                    epoch=epoch, metrics=row,
+                    model,
+                    args.out_dir / "best.pt",
+                    image_size=args.image_size,
+                    epoch=epoch,
+                    metrics=row,
                 )
         print(json.dumps(row), flush=True)
         history.append(row)

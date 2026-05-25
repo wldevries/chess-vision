@@ -90,6 +90,46 @@ def test_hflip_keeps_valid_visual_quad(chessred: ChessReD):
     assert float(target["corners"].min()) >= 0.0 and float(target["corners"].max()) <= 1.0
 
 
+def test_augment_keeps_valid_in_frame_quad(chessred: ChessReD):
+    """Colour + geometric augment, forced on, must keep corners in [0, 1] and in
+    visual-slot order (geometric self-skips any sample it would push off-frame)."""
+    cfg = CornerConfig(
+        image_size=256,
+        hflip_prob=0.5,
+        jitter=0.2,
+        hue=0.1,
+        saturation=0.4,
+        grayscale_prob=0.5,
+        rotate=5.0,
+        scale=0.1,
+        perspective=0.04,
+    )
+    ds = ChessReDCorners.from_split(chessred, "val", config=cfg, train=True)
+    for _ in range(20):  # augment is stochastic -- sample many draws of the same item
+        img, target = ds[0]
+        assert img.shape == (3, 256, 256)
+        assert 0.0 <= float(img.min()) and float(img.max()) <= 1.0
+        c = target["corners"]
+        assert float(c.min()) >= 0.0 and float(c.max()) <= 1.0
+        tl, tr, br, bl = c
+        assert tl[0] < tr[0] and bl[0] < br[0]
+        assert tl[1] < bl[1] and tr[1] < br[1]
+
+
+def test_geometric_can_change_the_image(chessred: ChessReD):
+    """Sanity: with geometric augment on, at least one draw differs from the unaugmented
+    image (i.e. the warp is actually applied, not always skipped)."""
+    from chessvision.data.corners import _CornerDataset  # noqa: F401
+
+    base = ChessReDCorners.from_split(
+        chessred, "val", config=CornerConfig(image_size=256), train=False
+    )
+    plain, _ = base[0]
+    cfg = CornerConfig(image_size=256, rotate=4.0, scale=0.08, perspective=0.03)
+    aug = ChessReDCorners.from_split(chessred, "val", config=cfg, train=True)
+    assert any(not torch.equal(aug[0][0], plain) for _ in range(20))
+
+
 def test_corner_order_constant():
     assert CORNER_ORDER == ("top_left", "top_right", "bottom_right", "bottom_left")
 

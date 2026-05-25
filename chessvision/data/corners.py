@@ -52,6 +52,21 @@ class CornerConfig:
     image_size: int = 384  # square network input (board ~fills the 3072^2 ChessReD frame)
     hflip_prob: float = 0.0  # train-time horizontal flip probability
     jitter: float = 0.0  # train-time brightness/contrast jitter magnitude (0 disables)
+    # Colour augmentation -- breaks the board-colour/wood-tone shortcut that plain
+    # brightness/contrast (luminance-only) leaves intact. Corners are a *geometric*
+    # target, so absolute colour should not matter; on a low-diversity board set
+    # (1 ChessReD board + a few captures) this is the cheapest lever against
+    # over-fitting board appearance. All photometric -> corner targets untouched.
+    hue: float = 0.0  # HSV hue jitter, fraction of the full circle (0 disables)
+    saturation: float = 0.0  # HSV saturation jitter magnitude, e.g. 0.3 -> x[0.7, 1.3]
+    grayscale_prob: float = 0.0  # probability of dropping colour entirely (gray->3ch)
+    # Geometric augmentation -- manufactures pose variety the thin board set lacks.
+    # Applied to image AND corner points together; skipped (identity) for any sample
+    # whose corners would land out of frame (soft-argmax can only represent in-frame
+    # targets, and a frame-filling board can rotate a corner off the edge).
+    rotate: float = 0.0  # max abs rotation in degrees about the image centre
+    scale: float = 0.0  # scale jitter magnitude, e.g. 0.1 -> x[0.9, 1.1]
+    perspective: float = 0.0  # corner-perturbation magnitude, fraction of image size
     cache: bool = False  # keep the resized image_size^2 array in RAM (decode each image once)
 
 
@@ -77,24 +92,87 @@ def collate_corners(batch):
     return images, out
 
 
+def _recanon(pts: np.ndarray) -> np.ndarray:
+    """Re-sort (4, 2) normalized points back into visual TL/TR/BR/BL slots."""
+    return corners_to_array({k: pts[i] for i, k in enumerate(CORNER_ORDER)})
+
+
+def _geometric(
+    rgb: np.ndarray, pts: np.ndarray, config: CornerConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rotation + scale + perspective about the image centre, applied to image and
+    corner points together. Returns the original (image, pts) unchanged if the sampled
+    transform would push any corner out of [0, 1] -- the soft-argmax head can only
+    express in-frame targets, and a frame-filling board (ChessReD) can rotate a corner
+    off the edge. Borders use reflect-101 so zoomed/rotated-in regions don't grow a
+    hard black frame the model could latch onto as a fake board boundary."""
+    if not (config.rotate or config.scale or config.perspective):
+        return rgb, pts
+    h, w = rgb.shape[:2]
+    angle = (torch.rand(1).item() * 2 - 1) * config.rotate
+    scale = 1.0 + (torch.rand(1).item() * 2 - 1) * config.scale
+    m = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, scale)
+    mat = np.vstack([m, [0.0, 0.0, 1.0]]).astype(np.float32)
+    if config.perspective:
+        d = config.perspective * min(w, h)
+        src = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+        off = (torch.rand(4, 2).numpy().astype(np.float32) * 2 - 1) * d
+        mat = (cv2.getPerspectiveTransform(src, src + off) @ mat).astype(np.float32)
+
+    px = pts * np.array([w, h], dtype=np.float32)
+    hom = np.concatenate([px, np.ones((len(px), 1), np.float32)], axis=1)
+    proj = (mat @ hom.T).T
+    new_pts = (proj[:, :2] / proj[:, 2:3]) / np.array([w, h], dtype=np.float32)
+    if new_pts.min() < 0.0 or new_pts.max() > 1.0:
+        return rgb, pts  # would clip a corner off-frame -> unlearnable; skip
+
+    warped = cv2.warpPerspective(
+        rgb, mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101
+    )
+    return np.ascontiguousarray(warped), _recanon(new_pts.astype(np.float32))
+
+
+def _photometric(rgb: np.ndarray, config: CornerConfig) -> np.ndarray:
+    """HSV hue/saturation jitter + brightness/contrast + random grayscale (colour-only,
+    so corner targets are untouched). Unlike the luminance-only brightness/contrast,
+    hue/saturation jitter and grayscale break a board-colour shortcut."""
+    if config.hue or config.saturation:
+        hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV).astype(np.float32)
+        if config.hue:  # OpenCV hue is in [0, 180); shift and wrap
+            dh = (torch.rand(1).item() * 2 - 1) * config.hue * 180.0
+            hsv[..., 0] = (hsv[..., 0] + dh) % 180.0
+        if config.saturation:
+            s = 1.0 + (torch.rand(1).item() * 2 - 1) * config.saturation
+            hsv[..., 1] = np.clip(hsv[..., 1] * s, 0, 255)
+        rgb = cv2.cvtColor(np.clip(hsv, 0, 255).astype(np.uint8), cv2.COLOR_HSV2RGB)
+    if config.jitter:
+        alpha = 1.0 + (torch.rand(1).item() * 2 - 1) * config.jitter  # contrast
+        beta = (torch.rand(1).item() * 2 - 1) * config.jitter * 255.0  # brightness
+        rgb = np.clip(rgb.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
+    if config.grayscale_prob and torch.rand(1).item() < config.grayscale_prob:
+        gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        rgb = np.repeat(gray[:, :, None], 3, axis=2)
+    return np.ascontiguousarray(rgb)
+
+
 def augment_corners(
     rgb: np.ndarray, pts: np.ndarray, config: CornerConfig
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Horizontal flip (mirror x, then re-canonicalize visual slots) + photometric jitter.
+    """Horizontal flip + geometric (rotation/scale/perspective) + photometric augment.
 
-    `pts` are normalized [0, 1] corners in visual-slot order. A flip swaps left/right,
+    `pts` are normalized [0, 1] corners in visual-slot order. The flip swaps left/right,
     so the visual TL becomes TR and BL becomes BR; re-running `order_corners` in
-    normalized space restores the slot ordering instead of hand-swapping pairs.
+    normalized space restores the slot ordering instead of hand-swapping pairs. The
+    geometric step does the same re-canonicalization after warping. Photometric augment
+    touches colour only, so it never moves the corner targets.
     """
     if config.hflip_prob and torch.rand(1).item() < config.hflip_prob:
         rgb = np.ascontiguousarray(rgb[:, ::-1])
         pts = pts.copy()
         pts[:, 0] = 1.0 - pts[:, 0]
-        pts = corners_to_array({k: pts[i] for i, k in enumerate(CORNER_ORDER)})
-    if config.jitter:
-        alpha = 1.0 + (torch.rand(1).item() * 2 - 1) * config.jitter  # contrast
-        beta = (torch.rand(1).item() * 2 - 1) * config.jitter * 255.0  # brightness
-        rgb = np.clip(rgb.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
+        pts = _recanon(pts)
+    rgb, pts = _geometric(rgb, pts, config)
+    rgb = _photometric(rgb, config)
     return rgb, pts
 
 
