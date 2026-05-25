@@ -17,6 +17,7 @@ from pathlib import Path
 
 import chess
 import chess.svg
+import cv2
 import numpy as np
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -148,11 +149,28 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def create_app(games: list[Game], out_root: Path, *, lichess_token: str | None = None) -> FastAPI:
+def create_app(
+    games: list[Game],
+    out_root: Path,
+    *,
+    lichess_token: str | None = None,
+    keypoint_ckpt: str | Path | None = None,
+    device: str | None = None,
+    predictor=None,
+) -> FastAPI:
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     games_by_id = {g.game_id: g for g in games}
     sessions: dict[str, Session] = {}
+
+    # Read-position (live FEN) mode. The predictor is constructed cheaply -- the
+    # model + torch only load on the first /api/live/predict call -- so the app
+    # starts instantly even with no checkpoint requested. A pre-built `predictor`
+    # can be injected (tests); otherwise it's built from `keypoint_ckpt`.
+    if predictor is None and keypoint_ckpt is not None:
+        from chessvision.inference import LivePredictor
+
+        predictor = LivePredictor(keypoint_ckpt, device=device)
 
     app = FastAPI(title="chessvision capture")
     app.mount("/captures", StaticFiles(directory=str(out_root)), name="captures")
@@ -425,6 +443,69 @@ def create_app(games: list[Game], out_root: Path, *, lichess_token: str | None =
             for c in session.captures:
                 fh.write(json.dumps(c) + "\n")
         return state_payload(session)
+
+    @app.get("/api/live/available")
+    def live_available() -> dict:
+        """Whether Read-position mode is wired (a checkpoint was provided at launch)."""
+        return {"available": predictor is not None}
+
+    @app.post("/api/live/predict")
+    async def live_predict(image: UploadFile, corners: str = Form(...)) -> dict:
+        """Read an unknown position: detect pieces, map contacts -> squares -> FEN.
+
+        `corners` is a JSON array of four [x, y] image points in any order (sorted
+        server-side). Returns one board SVG + FEN per orientation (R0..R270) so the
+        client can let the user rotate to the reading that matches reality, plus the
+        grid lattice and per-piece contact points for the live overlay.
+        """
+        if predictor is None:
+            raise HTTPException(503, "Read-position mode is off (launch with --keypoint-ckpt)")
+        data = await image.read()
+        if not data:
+            raise HTTPException(400, "empty image upload")
+        try:
+            pts = json.loads(corners)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, f"corners must be JSON: {exc}") from exc
+        if not isinstance(pts, list) or len(pts) != 4:
+            raise HTTPException(400, "corners must be a JSON array of four [x, y] points")
+
+        bgr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise HTTPException(400, "could not decode image")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        try:
+            result = predictor.predict(rgb, pts)
+        except Exception as exc:  # model / geometry failure -> 500 with the reason
+            raise HTTPException(500, f"prediction failed: {exc}") from exc
+
+        # Grid lines are orientation-independent (orientation only relabels squares),
+        # so one lattice suffices for the overlay.
+        homography = compute_homography(result.corners, Orientation.R0)
+        return {
+            "corners": result.corners,
+            "n_detected": result.n_detected,
+            "lattice": _round_pts(lattice_points(homography)),
+            "orientations": {
+                name: {
+                    "fen": o.fen,
+                    "board_fen": o.board_fen,
+                    "n_placed": o.n_placed,
+                    "board_svg": render_board_svg(o.fen, None, "white"),
+                }
+                for name, o in result.orientations.items()
+            },
+            "pieces": [
+                {
+                    "point": [round(p.point[0], 1), round(p.point[1], 1)],
+                    "symbol": p.symbol,
+                    "color": "w" if p.symbol.isupper() else "b",
+                    "score": round(p.score, 3),
+                    "squares": p.squares,
+                }
+                for p in result.pieces
+            ],
+        }
 
     @app.exception_handler(HTTPException)
     async def _http_error(_request, exc: HTTPException) -> JSONResponse:

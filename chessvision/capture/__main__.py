@@ -57,6 +57,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--out", type=Path, default=Path("data/captures"), help="output directory")
     p.add_argument("--host", default="127.0.0.1", help="bind host (use 0.0.0.0 for LAN access)")
     p.add_argument("--port", type=int, default=8000)
+    p.add_argument(
+        "--keypoint-ckpt",
+        type=Path,
+        default=None,
+        help="enable Read-position (live FEN) mode with this keypoint checkpoint "
+        "(e.g. runs/keypoint_captures/best.pt)",
+    )
+    p.add_argument(
+        "--device",
+        default=None,
+        help="torch device for live inference (default: cuda if available, else cpu)",
+    )
     return p.parse_args(argv)
 
 
@@ -85,7 +97,15 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Open http://{args.host}:{args.port} on the tablet, then pick a game and start snapping."
     )
-    app = create_app(games, args.out, lichess_token=token)
+    if args.keypoint_ckpt:
+        print(f"Read-position mode ON · checkpoint {args.keypoint_ckpt}")
+    app = create_app(
+        games,
+        args.out,
+        lichess_token=token,
+        keypoint_ckpt=args.keypoint_ckpt,
+        device=args.device,
+    )
     uvicorn.run(app, host=args.host, port=args.port)
     return 0
 

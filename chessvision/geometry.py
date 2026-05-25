@@ -50,6 +50,7 @@ ORIENTATION_TO_KEYS: dict[Orientation, tuple[str, str, str, str]] = {
 }
 
 Corners = Mapping[str, Sequence[float]]
+CornerDict = dict[str, list[float]]
 Point = Sequence[float]
 
 
@@ -61,6 +62,30 @@ def quad_area(corners: Corners) -> float:
     ring = np.array([corners[k] for k in IMAGE_CORNER_RING], dtype=np.float64)
     x, y = ring[:, 0], ring[:, 1]
     return 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+
+def order_corners(points: Sequence[Point]) -> CornerDict:
+    """Sort 4 arbitrary board-corner points into visual TL/TR/BR/BL slots.
+
+    Lets the caller click/detect the corners in *any* order: we split the four by
+    `y` into a top pair and a bottom pair, then split each pair by `x`. Robust for
+    any realistic board pose (it only mislabels if the board is shot rotated ~45°,
+    like a diamond -- not a real seated-player capture). This solves only the
+    *visual slot* assignment; which physical corner is a8 (R0/R90/R180/R270) is a
+    separate, non-geometric choice the caller still has to make.
+    """
+    pts = [(float(x), float(y)) for x, y in points]
+    if len(pts) != 4:
+        raise ValueError(f"need exactly 4 corner points, got {len(pts)}")
+    top, bottom = sorted(pts, key=lambda p: p[1])[:2], sorted(pts, key=lambda p: p[1])[2:]
+    tl, tr = sorted(top, key=lambda p: p[0])
+    bl, br = sorted(bottom, key=lambda p: p[0])
+    return {
+        "top_left": list(tl),
+        "top_right": list(tr),
+        "bottom_right": list(br),
+        "bottom_left": list(bl),
+    }
 
 
 def compute_homography(corners: Corners, orientation: Orientation = Orientation.R0) -> np.ndarray:

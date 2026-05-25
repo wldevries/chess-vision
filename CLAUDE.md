@@ -25,7 +25,19 @@ uv run chessvision <img> # CLI (also: uv run python predict.py <img>)
 uv run python scripts/sync_captures.py up    # push data/captures/ to MinIO
 uv run python scripts/sync_captures.py down  # pull it back (size-based skip)
 uv run python scripts/sync_captures.py tasks # build Label Studio pre-annotations -> bucket tasks/
+
+# Read-position (live FEN, Phase 4) mode in the web app: camera -> mark corners -> predicted FEN.
+# OFF unless a keypoint checkpoint is passed; toggle "Read position" in the header.
+uv run python -m chessvision.capture --keypoint-ckpt runs/keypoint_captures/best.pt
 ```
+
+Read-position mode glue is `chessvision/inference.py` (`LivePredictor`/`build_prediction`)
+behind `POST /api/live/predict`. It detects pieces, maps each contact keypoint through the
+homography to a square, and emits one board FEN per orientation (R0..R270) in a single pass —
+the same detection relabelled four ways. **Board orientation is a deliberate manual toggle**
+(which physical corner is a8 is NOT recoverable from geometry; all four rotations are valid),
+so the UI suggests one and the user rotates to the reading that matches reality. Clicked
+corners are sorted into TL/TR/BR/BL by `geometry.order_corners` (click order doesn't matter).
 
 `tasks` reads local captures (marked corners + FEN-projected piece estimates) and
 writes one Label Studio task-JSON per frame to the same bucket under `tasks/` (not
