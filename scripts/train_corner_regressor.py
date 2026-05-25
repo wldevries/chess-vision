@@ -1,0 +1,214 @@
+"""Train the board-corner localizer on ChessReD chessred2k (Phase 3).
+
+Trains a compact heatmap/soft-argmax corner model (`chessvision.corner_regressor`)
+on the 1442/330/306 chessred2k corner split and reports mean per-corner error.
+Corners are predicted in visual TL/TR/BR/BL slots (orientation stays a manual
+toggle downstream -- see `chessvision.data.corners`).
+
+Usage:
+    uv run python scripts/train_corner_regressor.py \
+        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --epochs 40 --batch-size 16 --device cuda --amp
+
+The headline metric is **mean per-corner error** as a fraction of image size
+(multiply by the native long side, ~3072 px for ChessReD, for pixels). A follow-up
+eval ties this to Phase-1 square-assignment accuracy -- the project-goal number.
+
+The entry point is guarded by `if __name__ == "__main__"` (required for DataLoader
+workers / process pools on Windows spawn).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from pathlib import Path
+
+import torch
+from torch.nn import functional as F
+from torch.utils.data import ConcatDataset, DataLoader
+
+from chessvision.corner_regressor import build_corner_regressor, save_corner_checkpoint
+from chessvision.data.chessred import ChessReD
+from chessvision.data.corners import (
+    CaptureCorners,
+    ChessReDCorners,
+    CornerConfig,
+    collate_corners,
+    select_capture_corner_poses,
+)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    add = p.add_argument
+    add("--data-root", required=True, type=Path, help="ChessReD dir (has annotations.json)")
+    add("--images-root", type=Path, default=None, help="image tree root override")
+    add("--backbone", default="mobilenet_v3_small", help="mobilenet_v3_small|_large, resnet18, ...")
+    add("--image-size", type=int, default=384, help="square network input")
+    add("--epochs", type=int, default=40)
+    add("--batch-size", type=int, default=16)
+    add("--lr", type=float, default=1e-3)
+    add("--weight-decay", type=float, default=1e-4)
+    add("--hflip", type=float, default=0.5, help="train horizontal-flip probability")
+    add("--jitter", type=float, default=0.1, help="train brightness/contrast jitter magnitude")
+    add("--workers", type=int, default=4, help="DataLoader workers (0 = main process)")
+    add("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    add("--amp", action="store_true", help="mixed precision (CUDA only)")
+    add("--limit-train", type=int, default=None, help="cap train images (smoke tests)")
+    add("--eval-every", type=int, default=1, help="run val every N epochs")
+    add("--out-dir", type=Path, default=Path("runs/corners"))
+    # Capture set (the user's own boards): added to train for board-appearance variety,
+    # deduped to distinct corner poses; held-out poses give an on-your-boards eval.
+    add("--captures-export", type=Path, default=Path("data/captures/label-studio.json"))
+    add("--no-captures", action="store_true", help="train on ChessReD only (ignore captures)")
+    add("--dedup-thr", type=float, default=0.02, help="distinct-pose threshold (frac of img size)")
+    add("--max-per-pose", type=int, default=2, help="frames kept per distinct corner pose")
+    return p.parse_args(argv)
+
+
+def build_loaders(args: argparse.Namespace, chessred: ChessReD):
+    """Returns (train_loader, val_loader, capture_eval_loader). The capture loaders are
+    None when captures are disabled/absent. Train = ChessReD train (+ deduped capture
+    poses); val = ChessReD val (the stable, diverse metric we select on); capture_eval =
+    held-out capture poses (the honest 'works on your boards' number)."""
+    train_cfg = CornerConfig(image_size=args.image_size, hflip_prob=args.hflip, jitter=args.jitter)
+    eval_cfg = CornerConfig(image_size=args.image_size)
+
+    chess_train = ChessReDCorners.from_split(chessred, "train", config=train_cfg)
+    if args.limit_train:
+        chess_train.image_ids = chess_train.image_ids[: args.limit_train]
+    val_ds = ChessReDCorners.from_split(chessred, "val", config=eval_cfg)
+
+    train_ds: object = chess_train
+    capture_eval_ds = None
+    if not args.no_captures and args.captures_export.exists():
+        cap_train, cap_heldout = select_capture_corner_poses(
+            args.captures_export, dedup_thr=args.dedup_thr, max_per_pose=args.max_per_pose
+        )
+        train_ds = ConcatDataset([chess_train, CaptureCorners(cap_train, train_cfg, train=True)])
+        capture_eval_ds = CaptureCorners(cap_heldout, eval_cfg, train=False)
+        print(f"captures: +{len(cap_train)} train poses | {len(cap_heldout)} held-out eval")
+
+    common = dict(
+        collate_fn=collate_corners,
+        num_workers=args.workers,
+        pin_memory=True,
+        persistent_workers=args.workers > 0,
+    )
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **common)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, **common)
+    capture_eval_loader = (
+        DataLoader(capture_eval_ds, batch_size=args.batch_size, shuffle=False, **common)
+        if capture_eval_ds is not None
+        else None
+    )
+    return train_loader, val_loader, capture_eval_loader
+
+
+def train_one_epoch(model, loader, optimizer, device, scaler, epoch) -> float:
+    model.train()
+    running = 0.0
+    t0 = time.time()
+    for step, (images, targets) in enumerate(loader):
+        images = images.to(device, non_blocking=True)
+        corners = targets["corners"].to(device, non_blocking=True)  # (B, 4, 2) in [0, 1]
+
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, enabled=scaler is not None):
+            pred = model(images)
+            loss = F.smooth_l1_loss(pred, corners)
+        if scaler is not None:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+
+        running += loss.item()
+        if step % 20 == 0:
+            rate = (step + 1) * images.shape[0] / (time.time() - t0)
+            print(
+                f"  epoch {epoch} step {step}/{len(loader)} loss {loss.item():.5f} "
+                f"({rate:.1f} img/s)",
+                flush=True,
+            )
+    return running / max(len(loader), 1)
+
+
+@torch.no_grad()
+def evaluate(model, loader, device) -> dict:
+    """Mean per-corner error in normalized units (fraction of image size).
+
+    `mean_corner_err` is the headline number; `worst_corner_err` is the per-image
+    max corner error averaged over the val set (a tail indicator -- one bad corner
+    breaks the homography).
+    """
+    model.eval()
+    total_err = 0.0
+    total_worst = 0.0
+    n_images = 0
+    for images, targets in loader:
+        images = images.to(device, non_blocking=True)
+        corners = targets["corners"].to(device, non_blocking=True)
+        pred = model(images)
+        dist = torch.linalg.vector_norm(pred - corners, dim=-1)  # (B, 4) per-corner L2
+        total_err += dist.mean(dim=1).sum().item()
+        total_worst += dist.max(dim=1).values.sum().item()
+        n_images += images.shape[0]
+    return {
+        "mean_corner_err": total_err / max(n_images, 1),
+        "worst_corner_err": total_worst / max(n_images, 1),
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    device = torch.device(args.device)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+
+    chessred = ChessReD.load(args.data_root, args.images_root)
+    train_loader, val_loader, capture_loader = build_loaders(args, chessred)
+    print(f"train {len(train_loader.dataset)} | val {len(val_loader.dataset)} | device {device}")
+
+    model = build_corner_regressor(backbone=args.backbone, pretrained=True).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler() if (args.amp and device.type == "cuda") else None
+
+    history = []
+    best_err = float("inf")
+    for epoch in range(1, args.epochs + 1):
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, scaler, epoch)
+        scheduler.step()
+        row = {"epoch": epoch, "train_loss": round(train_loss, 5), "lr": scheduler.get_last_lr()[0]}
+
+        if epoch % args.eval_every == 0 or epoch == args.epochs:
+            metrics = evaluate(model, val_loader, device)
+            row.update({k: round(v, 5) for k, v in metrics.items()})
+            if capture_loader is not None:
+                cap = evaluate(model, capture_loader, device)
+                row.update({f"cap_{k}": round(v, 5) for k, v in cap.items()})
+            if metrics["mean_corner_err"] < best_err:
+                best_err = metrics["mean_corner_err"]
+                save_corner_checkpoint(
+                    model, args.out_dir / "best.pt", image_size=args.image_size,
+                    epoch=epoch, metrics=row,
+                )
+        print(json.dumps(row), flush=True)
+        history.append(row)
+        save_corner_checkpoint(
+            model, args.out_dir / "last.pt", image_size=args.image_size, epoch=epoch
+        )
+        (args.out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+    print(f"done. best val mean corner err: {best_err:.5f} (fraction of image size)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

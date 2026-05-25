@@ -1,0 +1,157 @@
+"""ChessReD corner-dataset + corner-model checks. Skipped when data/torch absent."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from chessvision.data.chessred import ChessReD  # noqa: E402
+from chessvision.data.corners import (  # noqa: E402
+    CORNER_ORDER,
+    ChessReDCorners,
+    CornerConfig,
+    collate_corners,
+    corners_to_array,
+)
+
+DATA_ROOT = Path("data/Chess Recognition Dataset (ChessReD)_2_all")
+
+pytestmark = pytest.mark.skipif(
+    not (DATA_ROOT / "annotations.json").exists(),
+    reason="ChessReD dataset not present",
+)
+
+
+@pytest.fixture(scope="module")
+def chessred() -> ChessReD:
+    return ChessReD.load(DATA_ROOT)
+
+
+def test_corners_to_array_is_visual_slots():
+    # A square rotated so the annotation keys do NOT match visual position:
+    # the min-y point must end up as TL regardless of its semantic key.
+    ann = {
+        "top_left": [10.0, 50.0],
+        "top_right": [80.0, 10.0],  # actually the visually-topmost point
+        "bottom_right": [90.0, 60.0],
+        "bottom_left": [20.0, 95.0],
+    }
+    arr = corners_to_array(ann)
+    assert arr.shape == (4, 2)
+    tl, tr, br, bl = arr
+    # visual slots: top pair above bottom pair; left.x < right.x within each pair
+    assert tl[1] < bl[1] and tr[1] < br[1]
+    assert tl[0] < tr[0] and bl[0] < br[0]
+
+
+def test_split_sizes(chessred: ChessReD):
+    # corners exist exactly for the chessred2k subset
+    assert len(ChessReDCorners.from_split(chessred, "train")) == 1442
+    assert len(ChessReDCorners.from_split(chessred, "val")) == 330
+    assert len(ChessReDCorners.from_split(chessred, "test")) == 306
+
+
+def test_item_shapes_and_normalization(chessred: ChessReD):
+    ds = ChessReDCorners.from_split(chessred, "val", config=CornerConfig(image_size=256))
+    img, target = ds[0]
+    assert img.dtype == torch.float32 and img.shape == (3, 256, 256)
+    assert 0.0 <= float(img.min()) and float(img.max()) <= 1.0
+
+    corners = target["corners"]
+    assert corners.shape == (4, 2)
+    # normalized to [0, 1]
+    assert float(corners.min()) >= 0.0 and float(corners.max()) <= 1.0
+    # visual-slot ordering holds on real data too
+    tl, tr, br, bl = corners
+    assert tl[0] < tr[0] and bl[0] < br[0]
+    assert tl[1] < bl[1] and tr[1] < br[1]
+
+
+def test_collate_stacks(chessred: ChessReD):
+    ds = ChessReDCorners.from_split(chessred, "val", config=CornerConfig(image_size=128))
+    images, targets = collate_corners([ds[0], ds[1]])
+    assert images.shape == (2, 3, 128, 128)
+    assert targets["corners"].shape == (2, 4, 2)
+    assert targets["orig_size"].shape == (2, 2)
+
+
+def test_hflip_keeps_valid_visual_quad(chessred: ChessReD):
+    cfg = CornerConfig(image_size=256, hflip_prob=1.0)
+    ds = ChessReDCorners.from_split(chessred, "val", config=cfg, train=True)
+    _, target = ds[0]
+    tl, tr, br, bl = target["corners"]
+    # after flip + re-canonicalization the slot ordering must still hold
+    assert tl[0] < tr[0] and bl[0] < br[0]
+    assert tl[1] < bl[1] and tr[1] < br[1]
+    assert float(target["corners"].min()) >= 0.0 and float(target["corners"].max()) <= 1.0
+
+
+def test_corner_order_constant():
+    assert CORNER_ORDER == ("top_left", "top_right", "bottom_right", "bottom_left")
+
+
+CAPTURES_EXPORT = Path("data/captures/label-studio.json")
+
+
+@pytest.mark.skipif(not CAPTURES_EXPORT.exists(), reason="capture export not present")
+def test_capture_pose_selection_dedups_and_holds_out():
+    import numpy as np
+
+    from chessvision.data.corners import (
+        _corner_dist,
+        _norm_corners,
+        select_capture_corner_poses,
+    )
+
+    train, heldout = select_capture_corner_poses(CAPTURES_EXPORT, dedup_thr=0.02, max_per_pose=2)
+    assert train and heldout
+
+    # Held-out sessions never leak into train (session-grouped split).
+    train_sessions = {s.session for s in train}
+    heldout_sessions = {s.session for s in heldout}
+    assert train_sessions.isdisjoint(heldout_sessions)
+
+    # Anti-leak: no train pose sits within the dedup threshold of any held-out pose.
+    ho_corners = [_norm_corners(s) for s in heldout]
+    for s in train:
+        c = _norm_corners(s)
+        assert all(_corner_dist(c, h) > 0.02 for h in ho_corners)
+
+    # max_per_pose is respected: clustering train corners at the threshold yields no
+    # cluster larger than the cap (frames are deduped to distinct poses).
+    cs = [_norm_corners(s) for s in train]
+    counts = np.zeros(len(cs), dtype=int)
+    for i, ci in enumerate(cs):
+        counts[i] = sum(_corner_dist(ci, cj) <= 0.02 for cj in cs)
+    assert int(counts.max()) <= 2
+
+
+def test_model_forward_and_predict_shapes():
+    from chessvision.corner_regressor import (
+        build_corner_regressor,
+        predict_corners,
+        soft_argmax2d,
+    )
+
+    # soft-argmax of a single hot cell recovers its normalized location
+    heat = torch.full((1, 1, 9, 9), -1e4)
+    heat[0, 0, 0, 8] = 1e4  # row 0 (y=0), col 8 (x=1)
+    xy = soft_argmax2d(heat)[0, 0]
+    assert pytest.approx(float(xy[0]), abs=1e-3) == 1.0  # x
+    assert pytest.approx(float(xy[1]), abs=1e-3) == 0.0  # y
+
+    model = build_corner_regressor(pretrained=False).eval()
+    with torch.no_grad():
+        out = model(torch.zeros(2, 3, 128, 128))
+    assert out.shape == (2, 4, 2)
+    assert float(out.min()) >= 0.0 and float(out.max()) <= 1.0  # bounded by soft-argmax grid
+
+    rgb = np.zeros((480, 640, 3), dtype=np.uint8)
+    corners = predict_corners(model, rgb, image_size=128)
+    assert set(corners) == set(CORNER_ORDER)
+    # predictions scaled back to native pixels
+    assert all(0.0 <= x <= 640 and 0.0 <= y <= 480 for x, y in corners.values())
