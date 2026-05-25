@@ -33,6 +33,13 @@ from chessvision.data.storage import (
     upload_dir,
 )
 
+# Derived, regeneratable top-level files that must NOT travel to/from the bucket:
+# label-studio.json is rebuilt by `annotations` from the export bucket, positions.json
+# by save_capture_positions. Syncing them just clutters the (Label Studio source) bucket,
+# and `down` would clobber the freshly regenerated local copies. The small reference
+# sidecars (sets/boards/sessions/known_deviations.json) are NOT here — those do travel.
+DERIVED_SIDECARS = frozenset({"label-studio.json", "positions.json"})
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -173,11 +180,17 @@ def main(argv: list[str] | None = None) -> int:
             client=client,
             dry_run=args.dry_run,
             force=args.force,
+            ignore=DERIVED_SIDECARS,
         )
     else:
         print(f"downloading {config.endpoint_url}/{where} -> {args.local}")
         result = download_prefix(
-            args.prefix, args.local, config=config, client=client, dry_run=args.dry_run
+            args.prefix,
+            args.local,
+            config=config,
+            client=client,
+            dry_run=args.dry_run,
+            ignore=DERIVED_SIDECARS,
         )
 
     for key in result.transferred:

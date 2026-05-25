@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,6 +129,7 @@ def upload_dir(
     client=None,
     dry_run: bool = False,
     force: bool = False,
+    ignore: Collection[str] = (),
 ) -> SyncResult:
     """Upload `local_dir` to `<bucket>/<prefix>/...`, skipping same-size objects.
 
@@ -137,6 +138,9 @@ def upload_dir(
     Pass `force=True` to re-upload even same-size objects — needed to repair the
     content type of objects already in the bucket.
 
+    `ignore` is a set of basenames to never transfer (e.g. derived top-level files
+    that are regenerated locally and shouldn't live in the bucket).
+
     Relative paths under `local_dir` become keys under `prefix` (with forward
     slashes, as S3 requires regardless of host OS).
     """
@@ -144,11 +148,14 @@ def upload_dir(
     client = client or get_client(config)
     local_dir = Path(local_dir)
     prefix = prefix.strip("/")
+    ignore = set(ignore)
 
     remote = _remote_sizes(client, config.bucket, f"{prefix}/")
     transferred: list[str] = []
     skipped = 0
     for path in _iter_files(local_dir):
+        if path.name in ignore:
+            continue
         rel = path.relative_to(local_dir).as_posix()
         key = f"{prefix}/{rel}"
         if not force and remote.get(key) == path.stat().st_size:
@@ -172,19 +179,26 @@ def download_prefix(
     config: StorageConfig | None = None,
     client=None,
     dry_run: bool = False,
+    ignore: Collection[str] = (),
 ) -> SyncResult:
     """Download everything under `<bucket>/<prefix>/` into `local_dir`, mirroring
-    the key layout. Skips files already present at the same size."""
+    the key layout. Skips files already present at the same size.
+
+    `ignore` is a set of basenames to never download (e.g. derived top-level files
+    regenerated locally — pulling them would clobber the fresh local copy)."""
     config = config or StorageConfig.from_env()
     client = client or get_client(config)
     local_dir = Path(local_dir)
     prefix = prefix.strip("/")
+    ignore = set(ignore)
 
     remote = _remote_sizes(client, config.bucket, f"{prefix}/")
     transferred: list[str] = []
     skipped = 0
     for key, size in sorted(remote.items()):
         rel = key[len(prefix) + 1 :]  # strip "prefix/"
+        if Path(rel).name in ignore:
+            continue
         dest = local_dir / rel
         if dest.exists() and dest.stat().st_size == size:
             skipped += 1
