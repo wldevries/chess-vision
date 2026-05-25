@@ -35,6 +35,7 @@ from chessvision.data.corners import (
     CaptureCorners,
     ChessReDCorners,
     CornerConfig,
+    _cluster_by_corners,
     collate_corners,
     select_capture_corner_poses,
 )
@@ -133,7 +134,15 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
         capture_eval_ds = CaptureCorners(cap_heldout, eval_cfg, train=False)
         train_ds = ConcatDataset([chess_train, cap_train_ds])
         datasets += [cap_train_ds, capture_eval_ds]
-        print(f"captures: +{len(cap_train)} train poses | {len(cap_heldout)} held-out eval")
+        # Report frames AND distinct corner poses: the eval's real sample size is poses
+        # (near-duplicate frames of one camera setup aren't independent), so the pose
+        # count is what matters -- not the frame count.
+        n_train_poses = len(_cluster_by_corners(cap_train, args.dedup_thr))
+        n_heldout_poses = len(_cluster_by_corners(cap_heldout, args.dedup_thr))
+        print(
+            f"captures: +{len(cap_train)} train frames ({n_train_poses} poses) | "
+            f"{len(cap_heldout)} held-out frames ({n_heldout_poses} poses)"
+        )
 
     if cache:
         print(f"pre-warming image cache ({args.cache_workers} threads)...", flush=True)
