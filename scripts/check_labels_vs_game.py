@@ -24,6 +24,8 @@ from chessvision.data.captures import CaptureDataset
 from chessvision.data.label_qc import (
     count_problems,
     game_truth_problems,
+    image_filename,
+    load_positions,
     parse_source,
     true_board,
 )
@@ -50,23 +52,32 @@ def main(argv: list[str] | None = None) -> int:
     print(f"loaded {len(games)} games from {[str(p) for p in pgn_paths]}")
 
     dataset = CaptureDataset.load(args.captures)
+    positions = load_positions(dataset.captures_root)  # saved truth (covers puzzles offline)
+    print(f"loaded {len(positions)} saved positions")
+
     checked = flagged = heuristic = 0
     for sample in dataset.with_all_corners():
-        src = parse_source(sample.s3_uri)
-        game = games.get(src[0]) if src else None
-        if game is not None and src[1] < game.n_plies:
+        # Prefer the saved capture-time FEN (authoritative, covers puzzles); else replay
+        # the source PGN by game_id+ply; else fall back to the count heuristic.
+        fen = (positions.get(image_filename(sample)) or {}).get("fen")
+        if fen is None:
+            src = parse_source(sample.s3_uri)
+            game = games.get(src[0]) if src else None
+            if game is not None and src[1] < game.n_plies:
+                fen = game.plies[src[1]].fen
+        if fen is not None:
             checked += 1
-            problems = game_truth_problems(sample, true_board(game.plies[src[1]].fen))
-            tag = "vs-game"
+            problems = game_truth_problems(sample, true_board(fen))
+            tag = "vs-truth"
         else:
             heuristic += 1
-            problems = count_problems(sample)  # puzzles / unknown source
+            problems = count_problems(sample)  # unknown source
             tag = "heuristic"
         if problems:
             flagged += 1
             print(f"task {sample.task_id} ({tag}): {'; '.join(problems)}")
 
-    print(f"\n{flagged} flagged | {checked} checked vs game truth, {heuristic} by count heuristic.")
+    print(f"\n{flagged} flagged | {checked} checked vs truth, {heuristic} by count heuristic.")
     return 1 if flagged else 0
 
 

@@ -8,7 +8,9 @@ from chessvision.data.captures import CaptureSample, PieceKeypoint
 from chessvision.data.label_qc import (
     count_problems,
     game_truth_problems,
+    image_filename,
     label_board,
+    load_positions,
     parse_source,
     true_board,
 )
@@ -48,6 +50,13 @@ def test_parse_source():
     assert parse_source("s3://b/captures/s/euwe-0000_ply042_20260524.jpg") == ("euwe-0000", 42)
     assert parse_source("s3://b/captures/s/puzzle-1dMGZ_ply000_x.jpg") == ("puzzle-1dMGZ", 0)
     assert parse_source("s3://b/x/no_ply_here.jpg") is None
+
+
+def test_image_filename_and_load_positions(tmp_path):
+    assert image_filename(_sample([])) == "euwe-0000_ply007_x.jpg"
+    assert load_positions(tmp_path) == {}  # absent -> empty
+    (tmp_path / "positions.json").write_text('{"a.jpg": {"fen": "8/8/8/8/8/8/8/8 w - - 0 1"}}')
+    assert load_positions(tmp_path)["a.jpg"]["fen"].startswith("8/8")
 
 
 def test_true_board_startpos():

@@ -15,11 +15,28 @@ Pure (labels/corners/FEN only); the scripts own IO/CLI. python-chess parses FENs
 
 from __future__ import annotations
 
+import json
 from collections import Counter
+from pathlib import Path
 
 import chess
 
 from chessvision.geometry import Orientation, compute_homography, square_for_point
+
+
+def image_filename(sample) -> str:
+    """Bare image filename for a sample, e.g. 'euwe-0000_ply042_...jpg'."""
+    return sample.s3_uri.rsplit("/", 1)[-1]
+
+
+def load_positions(root: str | Path) -> dict[str, dict]:
+    """Saved ground-truth positions keyed by image filename (data/captures/positions.json
+    from `scripts/save_capture_positions.py`). Empty dict if the file is absent. Each
+    value has at least a 'fen'; puzzles also carry 'lichess_puzzle_id'."""
+    path = Path(root) / "positions.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
 # Per-colour max without promotions; FEN letter -> count.
 LEGAL_MAX = {"P": 8, "p": 8, "N": 2, "n": 2, "B": 2, "b": 2, "R": 2, "r": 2, "Q": 1, "q": 1}
