@@ -123,6 +123,7 @@ class Session:
     session_id: str
     game: Game
     out_dir: Path
+    started_at: str = ""  # set at start; written into session.json on the first snap
     ply_index: int = 0
     view: str = "white"  # cosmetic: which side is at the bottom of the SVG board
     corners: CornerDict | None = None  # image-pixel board corners, fixed for the session
@@ -170,6 +171,41 @@ def _meta_options(out_root: Path) -> dict[str, list[str]]:
         return sorted(k for k in data if not k.startswith("_"))
 
     return {"sets": keys("sets.json"), "boards": keys("boards.json")}
+
+
+def _write_session_meta(session: Session) -> None:
+    """Create the session's output dir and write session.json (idempotent).
+
+    Deferred to the first snap, not done at session start, so a session that is opened
+    but never photographed leaves nothing on disk (and so nothing to sync to the bucket).
+    `set`/`board`/`device` mirror the sessions.json schema so SessionMetadata reads the
+    domain axes straight off this per-session file (the central file is the fallback)."""
+    session.out_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = session.out_dir / "session.json"
+    if meta_path.exists():
+        return
+    g = session.game
+    meta_path.write_text(
+        json.dumps(
+            {
+                "session_id": session.session_id,
+                "started_at": session.started_at,
+                "game_id": g.game_id,
+                "white": g.white,
+                "black": g.black,
+                "event": g.event,
+                "date": g.date,
+                "result": g.result,
+                "start_fen": g.start_fen,
+                "n_plies": g.n_plies,
+                "set": session.piece_set or "",
+                "board": session.board or "",
+                "device": session.device or "",
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def create_app(
@@ -327,35 +363,13 @@ def create_app(
         session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
         if session_id in sessions:  # sub-second collision
             session_id = f"{session_id}-{len(sessions)}"
-        out_dir = out_root / session_id
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # `set`/`board`/`device` mirror the sessions.json schema so SessionMetadata can
-        # read the domain axes straight off this per-session file (central file is fallback).
-        (out_dir / "session.json").write_text(
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "started_at": _now_iso(),
-                    "game_id": game.game_id,
-                    "white": game.white,
-                    "black": game.black,
-                    "event": game.event,
-                    "date": game.date,
-                    "result": game.result,
-                    "start_fen": game.start_fen,
-                    "n_plies": game.n_plies,
-                    "set": piece_set or "",
-                    "board": board or "",
-                    "device": device or "",
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        # The output dir and session.json are written lazily on the first snap (see
+        # _write_session_meta), so opening a game without photographing it leaves no trace.
         session = Session(
             session_id=session_id,
             game=game,
-            out_dir=out_dir,
+            out_dir=out_root / session_id,
+            started_at=_now_iso(),
             piece_set=piece_set or None,
             board=board or None,
             device=device or None,
@@ -420,6 +434,7 @@ def create_app(
         if not data:
             raise HTTPException(400, "empty image upload")
 
+        _write_session_meta(session)  # creates the dir + session.json on first snap
         stamp = time.strftime("%Y%m%d-%H%M%S")
         filename = f"{session.game.game_id}_ply{ply.index:03d}_{stamp}.jpg"
         (session.out_dir / filename).write_bytes(data)
