@@ -55,14 +55,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--weight-decay", type=float, default=1e-4)
     add("--hflip", type=float, default=0.5, help="train horizontal-flip probability")
     add("--jitter", type=float, default=0.1, help="train brightness/contrast jitter magnitude")
-    # Colour aug -- attacks the board-colour shortcut (corners are geometric, not coloured).
-    add("--hue", type=float, default=0.05, help="HSV hue jitter, frac of full circle (0 off)")
-    add("--saturation", type=float, default=0.3, help="HSV saturation jitter magnitude (0 off)")
-    add("--grayscale-prob", type=float, default=0.2, help="prob. of dropping colour (0 off)")
-    # Geometric aug -- manufactures pose variety; auto-skips samples it would push off-frame.
-    add("--rotate", type=float, default=5.0, help="max abs rotation in degrees (0 off)")
-    add("--scale", type=float, default=0.1, help="scale jitter magnitude, e.g. 0.1 -> x[0.9,1.1]")
-    add("--perspective", type=float, default=0.04, help="perspective jitter, frac of size (0 off)")
+    # Colour aug -- off by default: a controlled seed-0 sweep (runs/corners_sweep) did
+    # NOT show it helping captures and the 16-pose held-out eval is too noisy to trust
+    # single-run diffs <~0.005. Re-enable per-flag to experiment (needs multi-seed eval).
+    add("--hue", type=float, default=0.0, help="HSV hue jitter, frac of full circle (0 off)")
+    add("--saturation", type=float, default=0.0, help="HSV saturation jitter magnitude (0 off)")
+    add("--grayscale-prob", type=float, default=0.0, help="prob. of dropping colour (0 off)")
+    # Geometric aug -- off by default (same reason); auto-skips samples it would push off-frame.
+    add("--rotate", type=float, default=0.0, help="max abs rotation in degrees (0 off)")
+    add("--scale", type=float, default=0.0, help="scale jitter magnitude, e.g. 0.1 -> x[0.9,1.1]")
+    add("--perspective", type=float, default=0.0, help="perspective jitter, frac of size (0 off)")
     add("--workers", type=int, default=4, help="DataLoader workers (ignored when caching)")
     add(
         "--no-cache",
@@ -74,6 +76,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--amp", action="store_true", help="mixed precision (CUDA only)")
     add("--limit-train", type=int, default=None, help="cap train images (smoke tests)")
     add("--eval-every", type=int, default=1, help="run val every N epochs")
+    add("--seed", type=int, default=0, help="RNG seed (model head init, aug draws, shuffle)")
+    add(
+        "--normalize",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="apply ImageNet mean/std normalization inside the model (--no-normalize to disable)",
+    )
     add("--out-dir", type=Path, default=Path("runs/corners"))
     # Capture set (the user's own boards): added to train for board-appearance variety,
     # deduped to distinct corner poses; held-out poses give an on-your-boards eval.
@@ -210,17 +219,26 @@ def evaluate(model, loader, device) -> dict:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     device = torch.device(args.device)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     chessred = ChessReD.load(args.data_root, args.images_root)
     train_loader, val_loader, capture_loader = build_loaders(args, chessred)
     print(f"train {len(train_loader.dataset)} | val {len(val_loader.dataset)} | device {device}")
 
-    model = build_corner_regressor(backbone=args.backbone, pretrained=True).to(device)
+    model = build_corner_regressor(
+        backbone=args.backbone, pretrained=True, normalize=args.normalize
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler() if (args.amp and device.type == "cuda") else None
 
+    # Select best.pt on the captures (your real boards) when present: chessred2k is a
+    # single foldable board, so its val is a same-board *memorization* metric that can
+    # move opposite to generalization (augmentation lowers cap error while raising
+    # ChessReD val). Fall back to ChessReD val only when captures are absent.
+    select_name = "cap_mean" if capture_loader is not None else "val_mean"
     history = []
     best_err = float("inf")
     for epoch in range(1, args.epochs + 1):
@@ -231,11 +249,13 @@ def main(argv: list[str] | None = None) -> int:
         if epoch % args.eval_every == 0 or epoch == args.epochs:
             metrics = evaluate(model, val_loader, device)
             row.update({k: round(v, 5) for k, v in metrics.items()})
+            select_err = metrics["mean_corner_err"]
             if capture_loader is not None:
                 cap = evaluate(model, capture_loader, device)
                 row.update({f"cap_{k}": round(v, 5) for k, v in cap.items()})
-            if metrics["mean_corner_err"] < best_err:
-                best_err = metrics["mean_corner_err"]
+                select_err = cap["mean_corner_err"]
+            if select_err < best_err:
+                best_err = select_err
                 save_corner_checkpoint(
                     model,
                     args.out_dir / "best.pt",
@@ -248,9 +268,11 @@ def main(argv: list[str] | None = None) -> int:
         save_corner_checkpoint(
             model, args.out_dir / "last.pt", image_size=args.image_size, epoch=epoch
         )
-        (args.out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
+        # JSONL: one compact object per epoch (DuckDB: read_json_auto('history.jsonl')).
+        jsonl = "\n".join(json.dumps(r) for r in history) + "\n"
+        (args.out_dir / "history.jsonl").write_text(jsonl, encoding="utf-8")
 
-    print(f"done. best val mean corner err: {best_err:.5f} (fraction of image size)")
+    print(f"done. best {select_name} corner err: {best_err:.5f} (fraction of image size)")
     return 0
 
 

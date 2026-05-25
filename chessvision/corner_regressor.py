@@ -85,11 +85,26 @@ class CornerHeatmapNet(nn.Module):
         backbone: str = DEFAULT_BACKBONE,
         pretrained: bool = True,
         num_corners: int = NUM_CORNERS,
+        normalize: bool = True,
     ):
         super().__init__()
         self.backbone_name = backbone
         self.num_corners = num_corners
+        self.normalize = normalize
         self.features, c = _build_backbone(backbone, pretrained)
+        # ImageNet normalization baked in as the first op (when enabled) so it travels
+        # with the exported graph -- this model exists to export to mobile, so keeping
+        # the mean/std in Python preprocessing would force every caller (train, predict,
+        # live, the native runtime) to re-apply it identically. Buffers are constants, so
+        # persistent=False keeps them out of the state_dict (no key churn; old checkpoints
+        # still load). Input contract: float CHW in [0, 1]. The torchvision backbone was
+        # pretrained with exactly these statistics.
+        self.register_buffer(
+            "norm_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False
+        )
+        self.register_buffer(
+            "norm_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False
+        )
         # Two bilinear-upsample stages lift the stride-32 feature map (12x12 at 384)
         # to ~48x48 heatmaps -- comfortable resolution for a sub-pixel expectation.
         self.head = nn.Sequential(
@@ -105,6 +120,8 @@ class CornerHeatmapNet(nn.Module):
         )
 
     def heatmaps(self, x: torch.Tensor) -> torch.Tensor:
+        if self.normalize:
+            x = (x - self.norm_mean) / self.norm_std
         return self.head(self.features(x))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -116,8 +133,11 @@ def build_corner_regressor(
     backbone: str = DEFAULT_BACKBONE,
     pretrained: bool = True,
     num_corners: int = NUM_CORNERS,
+    normalize: bool = True,
 ) -> CornerHeatmapNet:
-    return CornerHeatmapNet(backbone=backbone, pretrained=pretrained, num_corners=num_corners)
+    return CornerHeatmapNet(
+        backbone=backbone, pretrained=pretrained, num_corners=num_corners, normalize=normalize
+    )
 
 
 def save_corner_checkpoint(
@@ -136,6 +156,7 @@ def save_corner_checkpoint(
             "backbone": model.backbone_name,
             "image_size": image_size,
             "num_corners": model.num_corners,
+            "normalize": model.normalize,
             "corner_order": list(CORNER_ORDER),
             **extra,
         },
@@ -150,10 +171,13 @@ def load_corner_regressor(path: str | Path, device: str | torch.device = "cpu") 
     `predict_corners` resizes inputs to match without a separate arg.
     """
     ckpt = torch.load(path, map_location=device, weights_only=True)
+    # Default normalize=False for checkpoints predating this flag: those weights were
+    # trained on un-normalized [0, 1] input, so the model must reproduce that at inference.
     model = build_corner_regressor(
         backbone=ckpt.get("backbone", DEFAULT_BACKBONE),
         pretrained=False,
         num_corners=ckpt.get("num_corners", NUM_CORNERS),
+        normalize=ckpt.get("normalize", False),
     )
     model.load_state_dict(ckpt["state_dict"])
     model.image_size = int(ckpt.get("image_size", DEFAULT_IMAGE_SIZE))

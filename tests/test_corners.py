@@ -130,6 +130,37 @@ def test_geometric_can_change_the_image(chessred: ChessReD):
     assert any(not torch.equal(aug[0][0], plain) for _ in range(20))
 
 
+def test_normalize_is_applied_and_roundtrips(tmp_path):
+    from torch import nn
+
+    from chessvision.corner_regressor import (
+        build_corner_regressor,
+        load_corner_regressor,
+        save_corner_checkpoint,
+    )
+
+    # Stub backbone+head with identity so heatmaps() exposes exactly the input transform
+    # (a random untrained net would squash the difference below tolerance).
+    x = torch.rand(1, 3, 8, 8)
+    norm = build_corner_regressor(pretrained=False, normalize=True)
+    norm.features, norm.head = nn.Identity(), nn.Identity()
+    assert torch.allclose(norm.heatmaps(x), (x - norm.norm_mean) / norm.norm_std)
+
+    plain = build_corner_regressor(pretrained=False, normalize=False)
+    plain.features, plain.head = nn.Identity(), nn.Identity()
+    assert torch.allclose(plain.heatmaps(x), x)  # disabled -> passthrough
+
+    # mean/std are constants, not weights: persistent=False keeps them out of state_dict
+    assert "norm_mean" not in plain.state_dict() and "norm_std" not in plain.state_dict()
+
+    # the normalize flag round-trips through the checkpoint
+    ckpt = tmp_path / "m.pt"
+    save_corner_checkpoint(build_corner_regressor(pretrained=False, normalize=True), ckpt)
+    assert load_corner_regressor(ckpt).normalize is True
+    save_corner_checkpoint(build_corner_regressor(pretrained=False, normalize=False), ckpt)
+    assert load_corner_regressor(ckpt).normalize is False
+
+
 def test_corner_order_constant():
     assert CORNER_ORDER == ("top_left", "top_right", "bottom_right", "bottom_left")
 
