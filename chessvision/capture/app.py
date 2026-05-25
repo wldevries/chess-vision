@@ -22,7 +22,7 @@ import numpy as np
 from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from chessvision.capture.games import Game, Ply, fetch_lichess_puzzle_next
 from chessvision.geometry import (
@@ -56,6 +56,19 @@ class CornersIn(BaseModel):
             "bottom_right": list(self.bottom_right),
             "bottom_left": list(self.bottom_left),
         }
+
+
+class SessionMetaIn(BaseModel):
+    """Editable per-session domain tags (metadata editor). `set` is a Python builtin,
+    so it rides in under the `piece_set` field with a JSON alias. Omitted fields are
+    left unchanged; an empty string clears a tag."""
+
+    piece_set: str | None = Field(None, alias="set")
+    board: str | None = None
+    device: str | None = None
+    surface: str | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 def render_board_svg(fen: str, lastmove_uci: str | None, view: str, size: int = 480) -> str:
@@ -381,6 +394,66 @@ def create_app(
     def meta() -> dict:
         """Piece-set and board ids for the capture UI's Set/Board dropdowns."""
         return _meta_options(out_root)
+
+    @app.get("/api/sessions")
+    def list_sessions() -> list[dict]:
+        """Every on-disk capture session with its current domain tags and the
+        filenames of its photos — drives the metadata editor's master-detail view.
+        Tags come from SessionMetadata (per-session session.json overlaying the
+        central sessions.json), so already-tagged legacy sessions show correctly."""
+        from chessvision.data.session_meta import SessionMetadata
+
+        meta = SessionMetadata.load(out_root)
+        rows: list[dict] = []
+        for d in sorted((p for p in out_root.iterdir() if p.is_dir()), reverse=True):
+            images = sorted(f.name for f in d.glob("*.jpg"))
+            if not images and not (d / "session.json").exists():
+                continue  # not a capture session (stray dir)
+            info = (meta.info(d.name) if meta else None) or {}
+            rows.append(
+                {
+                    "session_id": d.name,
+                    "set": info.get("set", ""),
+                    "board": info.get("board", ""),
+                    "device": info.get("device", ""),
+                    "surface": info.get("surface", ""),
+                    "n_captures": len(images),
+                    "images": images,
+                }
+            )
+        return rows
+
+    @app.post("/api/sessions/{session_id}/meta")
+    def update_session_meta(session_id: str, body: SessionMetaIn) -> dict:
+        """Write the chosen tags into the session's session.json, preserving every
+        other key (game info, notes, lighting, ...). Only fields present in the body
+        are touched; an empty string clears that tag."""
+        sdir = out_root / session_id
+        if not sdir.is_dir():
+            raise HTTPException(404, f"unknown session: {session_id}")
+        path = sdir / "session.json"
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data.setdefault("session_id", session_id)
+        updates = {
+            "set": body.piece_set,
+            "board": body.board,
+            "device": body.device,
+            "surface": body.surface,
+        }
+        for key, val in updates.items():
+            if val is not None:
+                data[key] = val
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        # Keep an active in-memory session (if this one is live) consistent.
+        live = sessions.get(session_id)
+        if live is not None:
+            if body.piece_set is not None:
+                live.piece_set = body.piece_set or None
+            if body.board is not None:
+                live.board = body.board or None
+            if body.device is not None:
+                live.device = body.device or None
+        return {k: data.get(k, "") for k in ("session_id", "set", "board", "device", "surface")}
 
     @app.get("/api/session/{session_id}")
     def get_state(session_id: str) -> dict:
