@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from chessvision.capture.games import load_pgn_paths
@@ -54,8 +55,10 @@ def main(argv: list[str] | None = None) -> int:
     dataset = CaptureDataset.load(args.captures)
     positions = load_positions(dataset.captures_root)  # saved truth (covers puzzles offline)
     print(f"loaded {len(positions)} saved positions")
+    dev_path = Path(dataset.captures_root) / "known_deviations.json"
+    deviations = set(json.loads(dev_path.read_text())["task_ids"]) if dev_path.exists() else set()
 
-    checked = flagged = heuristic = 0
+    checked = flagged = heuristic = deviated = 0
     for sample in dataset.with_all_corners():
         # Prefer the saved capture-time FEN (authoritative, covers puzzles); else replay
         # the source PGN by game_id+ply; else fall back to the count heuristic.
@@ -73,11 +76,17 @@ def main(argv: list[str] | None = None) -> int:
             heuristic += 1
             problems = count_problems(sample)  # unknown source
             tag = "heuristic"
+        if problems and sample.task_id in deviations:
+            deviated += 1  # label is correct; the photographed board differs from intent
+            continue
         if problems:
             flagged += 1
             print(f"task {sample.task_id} ({tag}): {'; '.join(problems)}")
 
-    print(f"\n{flagged} flagged | {checked} checked vs truth, {heuristic} by count heuristic.")
+    print(
+        f"\n{flagged} flagged | {checked} checked vs truth, {heuristic} by count heuristic"
+        f"{f', {deviated} known setup-deviation(s) skipped' if deviated else ''}."
+    )
     return 1 if flagged else 0
 
 
