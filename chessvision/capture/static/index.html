@@ -57,7 +57,10 @@
   .cam-row.grow > select { flex: 1; max-width: none; }
 
   .board-wrap { flex: 1; min-height: 0; display: grid; place-items: center; }
-  .board-wrap svg { width: 100%; height: 100%; max-width: 70vh; }
+  .board-wrap svg { width: 100%; height: 100%; max-width: 70vh; transition: transform .15s ease; }
+  #board.rot90 svg { transform: rotate(90deg); }
+  #board.rot180 svg { transform: rotate(180deg); }
+  #board.rot270 svg { transform: rotate(270deg); }
   .instruction { font-size: 18px; margin: 10px 2px 4px; min-height: 1.4em; }
   .move-label { font-weight: 700; color: var(--accent); }
   .board-controls { display: flex; gap: 10px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
@@ -207,7 +210,7 @@
         <div class="board-controls">
           <button id="prevBtn" disabled>◀ Prev</button>
           <button id="nextBtn" disabled>Skip ▶</button>
-          <button id="flipBtn" disabled>Flip view</button>
+          <button id="flipBtn" disabled title="Rotate the preview board 90°">Rotate ⟳</button>
         </div>
       </span>
       <span class="read-only">
@@ -482,11 +485,16 @@ function redrawCorners() {
       const A = toDisplay(p[0], p[1], r), B = toDisplay(q[0], q[1], r);
       ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
     };
-    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(79,140,255,0.45)";
+    // Two passes per line: a dark halo so the grid reads on light squares,
+    // then the blue stroke on top. Wider + more opaque than before.
     for (let k = 1; k < 8; k++) {
       const t = k / 8;
-      seg(projectH(H, t, 0), projectH(H, t, 1));  // file lines
-      seg(projectH(H, 0, t), projectH(H, 1, t));  // rank lines
+      const f0 = projectH(H, t, 0), f1 = projectH(H, t, 1);
+      const r0 = projectH(H, 0, t), r1 = projectH(H, 1, t);
+      ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,0.35)";
+      seg(f0, f1); seg(r0, r1);
+      ctx.lineWidth = 1.5; ctx.strokeStyle = "rgba(79,140,255,0.85)";
+      seg(f0, f1); seg(r0, r1);
     }
     ctx.lineWidth = 2; ctx.strokeStyle = "#4f8cff";
   }
@@ -884,10 +892,18 @@ async function nextPuzzle() {
   await startSession(g.game_id);
 }
 async function goto(i) { if (state) { state = await postForm(`/api/session/${state.session_id}/goto`, { ply_index: i }); render(); } }
-async function flipView() {
+// Cosmetic-only: rotate the preview board in 90° steps so it can be matched to the
+// physical board's orientation. Pure CSS transform on the SVG — no server round-trip.
+let boardRotation = 0;  // 0/90/180/270
+function applyBoardRotation() {
+  const b = $("board");
+  b.classList.remove("rot90", "rot180", "rot270");
+  if (boardRotation) b.classList.add("rot" + boardRotation);
+}
+function rotateView() {
   if (!state) return;
-  state = await postForm(`/api/session/${state.session_id}/view`, { view: state.view === "white" ? "black" : "white" });
-  render();
+  boardRotation = (boardRotation + 90) % 360;
+  applyBoardRotation();
 }
 async function delCapture(fn) { if (state) { state = await fetch(`/api/session/${state.session_id}/capture/${fn}`, { method: "DELETE" }).then(j); render(); } }
 
@@ -1012,7 +1028,7 @@ $("finishBtn").onclick = () => finishSession().catch((e) => toast(e.message));
 $("snapBtn").onclick = snap;
 $("prevBtn").onclick = () => goto(state.ply_index - 1);
 $("nextBtn").onclick = () => goto(state.ply_index + 1);
-$("flipBtn").onclick = flipView;
+$("flipBtn").onclick = rotateView;
 $("markBtn").onclick = enterCornerMode;
 $("rotateBtn").onclick = rotateGrid;
 $("modeBtn").onclick = () => setMode(mode === "read" ? "capture" : "read");
