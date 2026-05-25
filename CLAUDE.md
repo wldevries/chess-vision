@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Phase 1 (homography)** is built and validated: `chessvision/geometry.py` + `selfcheck.py`, self-check at 99.96% **on ground-truth contact points** (this validates the geometry, *not* any box→point heuristic — see the contact-point anti-pattern).
 - **Phase 2 (piece detector)** — box-detector baseline **trained**: Faster R-CNN ResNet50-FPN v2 on the official chessred2k split, **best val mAP 0.864, mAP@50 0.999** (`chessvision/detector.py`, `chessvision/data/detection.py`, `scripts/train_detector.py`; weights in `runs/detector/best.pt`). This is a *box* detector, so its box→contact step is the **known weak link** — the next step is to **transplant a base-keypoint head** onto this trunk (see "Contact points" below).
 - **Contact points** — `chessvision/data/contact.py` generates the doctrine-pure base point (each piece's square center projected through the homography). **Visually validated** on the most-occluded boards (`scripts/build_occlusion_tasks.py --overlay-dir`): the point lands at the base even when the base is hidden. Key consequence: contact-point labels are **auto-generated geometric truth**, so the keypoint head needs **no manual labelling** — the S3/Label-Studio review loop is *optional QA*, not a training prerequisite.
-- **Phase 3 (corner regression)** not built — corners are still manual.
+- **Phase 3 (corner regression)** — built: a compact soft-argmax heatmap localizer (`chessvision/corner_regressor.py`, `scripts/train_corner_regressor.py`; weights in `runs/corners/best.pt`). Also wired into the capture app as corner-assist (a "Predict" button pre-fills the corner handles). Trained on ChessReD + the user's captures; eval is reported per board (`cap_*` metrics).
 - CUDA torch is pinned via the `cu128` index in `pyproject.toml` (`[tool.uv.sources]`); don't let a bare `uv pip install torch` drift it back to CPU. Keep Label Studio in a *separate* venv (it drags `opencv-python-headless`, which collides with our `opencv-python`).
 
 ## Commands
@@ -60,12 +60,44 @@ storage**, not the manual Export button: LS writes one JSON per annotation to th
 task shape, drops cancelled/skipped annotations, and dedups re-labels (latest `updated_at`
 per task id wins). Re-run it whenever you label more; then `down` to mirror any new images.
 
+**Sync before training/eval — when it matters.** Anything that reads
+`data/captures/label-studio.json` only sees what's in that file; it does **not** pull
+from the bucket itself. So before running these, sync first: `sync_captures.py annotations`
+(fold new LS exports into the merged JSON) → `sync_captures.py down` (mirror any new
+images) → run. Affected:
+- `train_corner_regressor.py` — captures are part of **training**: frames are clustered into
+  distinct corner *poses*, and a deterministic `--val-frac` share of **each board's** poses
+  becomes the held-out `cap_*` eval, the rest train (anti-leak drops train poses within
+  `dedup_thr` of a held-out one). The split is derived from corner geometry + the session's
+  board tag — **no manual "held-out" tag** (`select_capture_corner_poses`). Stale data/tags =
+  you train on fewer/old boards and mis-measure, so sync first.
+- `finetune_keypoint_captures.py` — trains the keypoint head **directly** on the captures.
+- `eval_detector_on_captures.py`, `check_capture_labels.py`, `save_capture_positions.py` —
+  eval/inspection; stale = dishonest numbers.
+
+Not affected (ChessReD-only, never touch captures): `train_detector.py` (box detector
+baseline) and `train_keypoint_head.py` (keypoint-head pretrain). Sync is irrelevant to those.
+
+**Session metadata (the domain axes that drive the split).** Each capture session is tagged
+with its physical domain — piece `set`, `board`, `device` (camera), `surface` — chosen in the
+capture UI at session start and written into the per-session `session.json` (deferred to the
+first snap, so a session opened but never photographed leaves nothing on disk). `SessionMetadata`
+(`chessvision/data/session_meta.py`) reads per-session `session.json` first, overlaying the
+central `sessions.json` (legacy/manual tags) as fallback. `sets.json`/`boards.json` are shared
+reference (mm measurements per set/board, named by square size e.g. `staunton-56mm`). Retag past
+sessions with the **Edit sessions** modal in the capture app (`/api/sessions`, photo previews).
+Because the corner split keys on the `board` tag, tagging is what makes a board show up in eval.
+
 The captured dataset lives in a MinIO bucket on the local network (S3-compatible).
 Config is in `.env` (gitignored; template in `.env.example`): `MINIO_ENDPOINT_URL`
 (the API port `:9000`, not the console `:9001`), `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`,
 `MINIO_BUCKET`. Helper module: `chessvision/data/storage.py` (boto3 + python-dotenv).
 MinIO Community Edition no longer creates access keys in the web console — use
-`mc admin accesskey create <alias> --access-key chess-app`.
+`mc admin accesskey create <alias> --access-key chess-app`. `up`/`down` mirror the whole
+`data/captures/` tree **except** the derived top-level files `label-studio.json` and
+`positions.json` — those are regenerated locally (by `annotations` / `save_capture_positions`)
+and must not travel: syncing them clutters the Label Studio source bucket and a later `down`
+would clobber the freshly regenerated local copy.
 
 Add a dependency with `uv add <pkg>` (or `uv add --dev <pkg>`); keep upper bounds on volatile deps (see Reproducibility). `uv.lock` is committed — never edit it by hand.
 
