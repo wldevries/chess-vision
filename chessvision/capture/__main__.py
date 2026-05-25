@@ -65,6 +65,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "(e.g. runs/keypoint_captures/best.pt)",
     )
     p.add_argument(
+        "--corner-ckpt",
+        type=Path,
+        default=None,
+        help="enable corner-assist (a 'Predict' button pre-fills the corner-marking "
+        "handles) with this corner-regressor checkpoint (e.g. runs/corners/best.pt)",
+    )
+    p.add_argument(
         "--device",
         default=None,
         help="torch device for live inference (default: cuda if available, else cpu)",
@@ -99,11 +106,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.keypoint_ckpt:
         print(f"Read-position mode ON · checkpoint {args.keypoint_ckpt}")
+    if args.corner_ckpt:
+        print(f"Corner-assist ON · checkpoint {args.corner_ckpt}")
     app = create_app(
         games,
         args.out,
         lichess_token=token,
         keypoint_ckpt=args.keypoint_ckpt,
+        corner_ckpt=args.corner_ckpt,
         device=args.device,
     )
     uvicorn.run(app, host=args.host, port=args.port)

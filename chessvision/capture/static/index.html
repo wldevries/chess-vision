@@ -194,6 +194,7 @@
   <div class="corner-modal" id="cornerModal">
     <div class="corner-toolbar">
       <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
+      <button id="predictCorner" hidden>Predict</button>
       <button id="undoCorner">Undo</button>
       <button id="cancelCorner">Cancel</button>
       <button id="saveCorner" class="primary" disabled>Save</button>
@@ -299,6 +300,15 @@ async function onCameraChange(deviceId) {
 function currentDeviceId() { return $("cameraSelect").value; }
 
 /* ---------- corner marking ---------- */
+// The corners already set for this board, as [[x,y]*4] in native px, so re-entering
+// corner mode shows them to adjust rather than starting blank. Read mode keeps an
+// array (live.corners); capture mode keeps the server CornerDict (state.corners).
+function existingCornerPts() {
+  if (mode === "read") return Array.isArray(live.corners) ? live.corners.map((p) => p.slice()) : [];
+  const c = state && state.corners;
+  if (!c || !c.top_left) return [];
+  return [c.top_left, c.top_right, c.bottom_right, c.bottom_left].map((p) => p.slice());
+}
 function enterCornerMode() {
   const v = $("video");
   if (!stream || !v.videoWidth) return toast("Camera not ready");
@@ -306,7 +316,7 @@ function enterCornerMode() {
   frozen = document.createElement("canvas");
   frozen.width = v.videoWidth; frozen.height = v.videoHeight;
   frozen.getContext("2d").drawImage(v, 0, 0);
-  cornerPts = []; cornerMode = true; dragging = null;
+  cornerPts = existingCornerPts(); cornerMode = true; dragging = null;
   $("cornerModal").classList.add("show");
   requestAnimationFrame(redrawCorners);
 }
@@ -366,6 +376,26 @@ function orderCorners(pts) {
   const [bl, br] = s.slice(2, 4).sort((a, b) => a[0] - b[0]);
   return { tl, tr, br, bl };
 }
+// Homography mapping the unit square (0,0)(1,0)(1,1)(0,1) -> tl,tr,br,bl (Heckbert
+// square->quad). Lets us draw the perspective-correct 8x8 grid from just the 4 corners.
+function squareToQuad(tl, tr, br, bl) {
+  const [x0, y0] = tl, [x1, y1] = tr, [x2, y2] = br, [x3, y3] = bl;
+  const dx1 = x1 - x2, dx2 = x3 - x2, sx = x0 - x1 + x2 - x3;
+  const dy1 = y1 - y2, dy2 = y3 - y2, sy = y0 - y1 + y2 - y3;
+  if (Math.abs(sx) < 1e-9 && Math.abs(sy) < 1e-9) {  // affine (parallelogram)
+    return { a: x1 - x0, b: x3 - x0, c: x0, d: y1 - y0, e: y3 - y0, f: y0, g: 0, h: 0 };
+  }
+  const den = dx1 * dy2 - dx2 * dy1;
+  const g = (sx * dy2 - dx2 * sy) / den, h = (dx1 * sy - sx * dy1) / den;
+  return {
+    a: x1 - x0 + g * x1, b: x3 - x0 + h * x3, c: x0,
+    d: y1 - y0 + g * y1, e: y3 - y0 + h * y3, f: y0, g, h,
+  };
+}
+function projectH(H, u, v) {
+  const w = H.g * u + H.h * v + 1;
+  return [(H.a * u + H.b * v + H.c) / w, (H.d * u + H.e * v + H.f) / w];
+}
 function redrawCorners() {
   const c = $("cornerCanvas");
   c.width = c.clientWidth; c.height = c.clientHeight;
@@ -381,6 +411,22 @@ function redrawCorners() {
   ring.forEach(([x, y], i) => { const [dx, dy] = toDisplay(x, y, r); i ? ctx.lineTo(dx, dy) : ctx.moveTo(dx, dy); });
   if (ring.length === 4) ctx.closePath();
   ctx.stroke();
+  // With all 4 corners, draw the perspective-correct 8x8 grid so you can align it to
+  // the real board squares (homographies map lines to lines, so each segment is straight).
+  if (o) {
+    const H = squareToQuad(o.tl, o.tr, o.br, o.bl);
+    const seg = (p, q) => {
+      const A = toDisplay(p[0], p[1], r), B = toDisplay(q[0], q[1], r);
+      ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
+    };
+    ctx.lineWidth = 1; ctx.strokeStyle = "rgba(79,140,255,0.45)";
+    for (let k = 1; k < 8; k++) {
+      const t = k / 8;
+      seg(projectH(H, t, 0), projectH(H, t, 1));  // file lines
+      seg(projectH(H, 0, t), projectH(H, 1, t));  // rank lines
+    }
+    ctx.lineWidth = 2; ctx.strokeStyle = "#4f8cff";
+  }
   cornerPts.forEach(([x, y], i) => {
     const [dx, dy] = toDisplay(x, y, r);
     ctx.beginPath(); ctx.arc(dx, dy, 8, 0, 7); ctx.fill();
@@ -388,7 +434,7 @@ function redrawCorners() {
   });
   $("cornerHint").textContent = cornerPts.length < 4
     ? `Tap the 4 board corners in any order (${cornerPts.length}/4). Drag any marker to adjust.`
-    : "All 4 placed. Drag any marker to refine, then press Save.";
+    : "All 4 placed. Drag any corner until the grid lines up with the board squares, then Save.";
   $("saveCorner").disabled = cornerPts.length !== 4;
 }
 async function saveCorners() {
@@ -504,6 +550,27 @@ async function snap() {
     toast("Saved ✓");
   } catch (e) { toast("Snap failed: " + e.message); }
   updateButtons();
+}
+
+/* ---------- corner-assist (predict + nudge) ---------- */
+async function checkCornerAssist() {
+  let avail = false;
+  try { avail = (await fetch("/api/corners/available").then(j)).available; } catch { /* off */ }
+  $("predictCorner").hidden = !avail;
+}
+async function predictCorners() {
+  if (!frozen) return;
+  $("predictCorner").disabled = true;
+  $("cornerHint").textContent = "Predicting corners…";
+  try {
+    const blob = await new Promise((res) => frozen.toBlob(res, "image/jpeg", 0.92));
+    const body = new FormData();
+    body.append("image", blob, "frame.jpg");
+    const { corners: c } = await fetch("/api/corners/predict", { method: "POST", body }).then(j);
+    cornerPts = [c.top_left, c.top_right, c.bottom_right, c.bottom_left];  // native px; nudge to fix
+    redrawCorners();
+  } catch (e) { toast("Predict failed: " + e.message); }
+  $("predictCorner").disabled = false;
 }
 
 /* ---------- read position (live FEN) ---------- */
@@ -736,6 +803,7 @@ $("cornerCanvas").addEventListener("pointermove", cornerPointerMove);
 $("cornerCanvas").addEventListener("pointerup", cornerPointerUp);
 $("cornerCanvas").addEventListener("pointercancel", cornerPointerUp);
 $("cornerModal").addEventListener("contextmenu", (e) => e.preventDefault());
+$("predictCorner").onclick = () => predictCorners().catch((e) => toast(e.message));
 $("undoCorner").onclick = () => { if (cornerPts.length) { cornerPts.pop(); redrawCorners(); } };
 $("cancelCorner").onclick = cancelCornerMode;
 $("saveCorner").onclick = () => saveCorners().catch((e) => toast(e.message));
@@ -758,6 +826,7 @@ document.addEventListener("keydown", (e) => {
 
 loadGames().catch((e) => toast(e.message));
 checkLiveAvailable().then(updateButtons);
+checkCornerAssist();
 listCameras();
 overlayLoop();
 </script>

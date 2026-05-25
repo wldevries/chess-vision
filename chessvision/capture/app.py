@@ -155,8 +155,10 @@ def create_app(
     *,
     lichess_token: str | None = None,
     keypoint_ckpt: str | Path | None = None,
+    corner_ckpt: str | Path | None = None,
     device: str | None = None,
     predictor=None,
+    corner_predictor=None,
 ) -> FastAPI:
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -171,6 +173,13 @@ def create_app(
         from chessvision.inference import LivePredictor
 
         predictor = LivePredictor(keypoint_ckpt, device=device)
+
+    # Corner-assist: pre-fill the corner-marking UI from the trained corner regressor.
+    # Same lazy contract -- the model loads on the first /api/corners/predict call.
+    if corner_predictor is None and corner_ckpt is not None:
+        from chessvision.inference import CornerPredictor
+
+        corner_predictor = CornerPredictor(corner_ckpt, device=device)
 
     app = FastAPI(title="chessvision capture")
     app.mount("/captures", StaticFiles(directory=str(out_root)), name="captures")
@@ -506,6 +515,33 @@ def create_app(
                 for p in result.pieces
             ],
         }
+
+    @app.get("/api/corners/available")
+    def corners_available() -> dict:
+        """Whether corner-assist is wired (a corner checkpoint was provided at launch)."""
+        return {"available": corner_predictor is not None}
+
+    @app.post("/api/corners/predict")
+    async def corners_predict(image: UploadFile) -> dict:
+        """Predict the 4 board corners from a frame, to pre-fill the marking UI.
+
+        Returns `{"corners": {top_left, top_right, bottom_right, bottom_left}}` in native
+        image pixels; the client seeds the draggable handles with these and the user nudges.
+        """
+        if corner_predictor is None:
+            raise HTTPException(503, "Corner-assist is off (launch with --corner-ckpt)")
+        data = await image.read()
+        if not data:
+            raise HTTPException(400, "empty image upload")
+        bgr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise HTTPException(400, "could not decode image")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        try:
+            corners = corner_predictor.predict(rgb)
+        except Exception as exc:  # model failure -> 500 with the reason
+            raise HTTPException(500, f"corner prediction failed: {exc}") from exc
+        return {"corners": corners}
 
     @app.exception_handler(HTTPException)
     async def _http_error(_request, exc: HTTPException) -> JSONResponse:

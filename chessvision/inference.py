@@ -219,3 +219,38 @@ class LivePredictor:
         labels = out["labels"][keep].cpu().tolist()
         scores = out["scores"][keep].cpu().tolist()
         return build_prediction(corners_in, points, labels, scores, tol=self.tol)
+
+
+class CornerPredictor:
+    """Lazy-loaded board-corner regressor: an RGB frame -> 4 board corners.
+
+    Mirrors `LivePredictor`'s lazy-load contract (torch + weights load on first
+    `predict`, so importing this and starting the web app stays cheap). Used to
+    *pre-fill* the corner-marking UI so the user nudges instead of placing from
+    scratch -- the predicted corners are a `CornerDict` in native image pixels,
+    ready for `geometry.order_corners` / `compute_homography`.
+    """
+
+    def __init__(self, ckpt: str | Path = Path("runs/corners/best.pt"), device: str | None = None):
+        self.ckpt = Path(ckpt)
+        self._device = device
+        self._model = None
+
+    def _ensure_loaded(self):
+        if self._model is not None:
+            return
+        import torch
+
+        from chessvision.corner_regressor import load_corner_regressor
+
+        if not self.ckpt.exists():
+            raise FileNotFoundError(f"corner checkpoint not found: {self.ckpt}")
+        self._device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._model = load_corner_regressor(self.ckpt, self._device)
+
+    def predict(self, rgb: np.ndarray) -> CornerDict:
+        """Predict the 4 board corners for `rgb` (H, W, 3 uint8), in native pixels."""
+        from chessvision.corner_regressor import predict_corners
+
+        self._ensure_loaded()
+        return predict_corners(self._model, np.ascontiguousarray(rgb), self._device)

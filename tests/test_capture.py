@@ -280,3 +280,54 @@ def test_dataclasses_are_constructible() -> None:
     game = Game("g", "W", "B", "E", "D", "*", chess.STARTING_FEN, [ply])
     assert game.label.startswith("W - B")
     assert game.n_plies == 1
+
+
+# --- corner-assist endpoints ------------------------------------------------ #
+
+
+class _FakeCornerPredictor:
+    """Stand-in for CornerPredictor: returns a fixed corner dict, no model/torch."""
+
+    CORNERS = {
+        "top_left": [1.0, 2.0],
+        "top_right": [3.0, 4.0],
+        "bottom_right": [5.0, 6.0],
+        "bottom_left": [7.0, 8.0],
+    }
+
+    def predict(self, rgb):
+        return dict(self.CORNERS)
+
+
+def _jpeg_bytes() -> bytes:
+    import cv2
+    import numpy as np
+
+    ok, buf = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))
+    assert ok
+    return buf.tobytes()
+
+
+def test_corner_assist_off_by_default(client: TestClient) -> None:
+    assert client.get("/api/corners/available").json() == {"available": False}
+    resp = client.post(
+        "/api/corners/predict", files={"image": ("f.jpg", _jpeg_bytes(), "image/jpeg")}
+    )
+    assert resp.status_code == 503  # not wired without --corner-ckpt
+
+
+def test_corner_assist_predicts_when_injected(tmp_path: Path) -> None:
+    games = load_pgn_file(SAMPLE_PGN)
+    client = TestClient(create_app(games, tmp_path, corner_predictor=_FakeCornerPredictor()))
+
+    assert client.get("/api/corners/available").json() == {"available": True}
+
+    resp = client.post(
+        "/api/corners/predict", files={"image": ("f.jpg", _jpeg_bytes(), "image/jpeg")}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["corners"] == _FakeCornerPredictor.CORNERS
+
+    # empty upload is a 400, not a 500
+    empty = client.post("/api/corners/predict", files={"image": ("f.jpg", b"", "image/jpeg")})
+    assert empty.status_code == 400
