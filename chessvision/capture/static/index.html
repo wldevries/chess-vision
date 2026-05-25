@@ -224,6 +224,7 @@ function postJson(url, obj) {
 let state = null;        // latest session state from the server (capture mode)
 let stream = null;       // active MediaStream
 let cornerMode = false;  // marking corners?
+let snapping = false;    // a /snap request is in flight (re-entrancy guard)
 let cornerPts = [];      // clicked points (native video px), any order
 let frozen = null;       // offscreen canvas: the frame being marked
 let dragging = null;     // index of corner being dragged, or null
@@ -539,7 +540,8 @@ function captureBlob() {
   return new Promise((res) => c.toBlob(res, "image/jpeg", 0.92));
 }
 async function snap() {
-  if (!state || !stream || cornerMode) return;
+  if (!state || !stream || cornerMode || snapping) return;
+  snapping = true;
   $("snapBtn").disabled = true;
   try {
     const blob = await captureBlob();
@@ -549,7 +551,7 @@ async function snap() {
     render();
     toast("Saved ✓");
   } catch (e) { toast("Snap failed: " + e.message); }
-  updateButtons();
+  finally { snapping = false; updateButtons(); }
 }
 
 /* ---------- corner-assist (predict + nudge) ---------- */
@@ -812,6 +814,7 @@ $("modalClose").onclick = () => $("modal").classList.remove("show");
 $("modal").onclick = (e) => { if (e.target.id === "modal") $("modal").classList.remove("show"); };
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "SELECT") return;
+  if (e.repeat) return;  // ignore auto-repeat from a held key (avoids double-snap / runaway nav)
   if (cornerMode) {
     if (e.code === "Escape") cancelCornerMode();
     else if (e.code === "Enter" && cornerPts.length === 4) { e.preventDefault(); saveCorners().catch((err) => toast(err.message)); }
