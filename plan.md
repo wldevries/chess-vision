@@ -137,6 +137,11 @@ Worth using as a **bootstrap, not as the final training set.**
 
 > Always check each dataset's license before training.
 
+> **Corner data is viewpoint-bound, not position-bound** — the corner localizer's eval is
+> starved of distinct camera viewpoints (only 37 across 409 photos), which is the binding
+> constraint on Phase 3, not the model. A dedicated *corner-capture mode* collects pose
+> diversity cheaply (no FEN/legality/moves). See [`corner-capture-mode.md`](corner-capture-mode.md).
+
 ---
 
 ## 6. Phased steps
