@@ -127,6 +127,11 @@ class Session:
     view: str = "white"  # cosmetic: which side is at the bottom of the SVG board
     corners: CornerDict | None = None  # image-pixel board corners, fixed for the session
     orientation: Orientation = Orientation.R0  # which canonical anchor maps to which corner
+    # Domain axes, chosen in the UI at session start and written into session.json so
+    # SessionMetadata reads them from the session itself (no hand-maintained central file).
+    piece_set: str | None = None  # sets.json key (the physical piece set)
+    board: str | None = None  # boards.json key (board geometry)
+    device: str | None = None  # camera label, e.g. "HD Pro Webcam C920"
     captures: list[dict] = field(default_factory=list)
 
     @property
@@ -147,6 +152,24 @@ class Session:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def _meta_options(out_root: Path) -> dict[str, list[str]]:
+    """Available piece-set and board ids for the capture UI's Set/Board dropdowns,
+    read from the central `sets.json`/`boards.json` reference files (shared physical
+    measurements). Comment keys (leading `_`) are skipped; a missing file -> empty list."""
+
+    def keys(name: str) -> list[str]:
+        path = out_root / name
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return []
+        return sorted(k for k in data if not k.startswith("_"))
+
+    return {"sets": keys("sets.json"), "boards": keys("boards.json")}
 
 
 def create_app(
@@ -292,7 +315,12 @@ def create_app(
         }
 
     @app.post("/api/session")
-    def start_session(game_id: str = Form(...)) -> dict:
+    def start_session(
+        game_id: str = Form(...),
+        piece_set: str | None = Form(None),
+        board: str | None = Form(None),
+        device: str | None = Form(None),
+    ) -> dict:
         game = games_by_id.get(game_id)
         if game is None:
             raise HTTPException(404, f"unknown game: {game_id}")
@@ -301,6 +329,8 @@ def create_app(
             session_id = f"{session_id}-{len(sessions)}"
         out_dir = out_root / session_id
         out_dir.mkdir(parents=True, exist_ok=True)
+        # `set`/`board`/`device` mirror the sessions.json schema so SessionMetadata can
+        # read the domain axes straight off this per-session file (central file is fallback).
         (out_dir / "session.json").write_text(
             json.dumps(
                 {
@@ -314,14 +344,29 @@ def create_app(
                     "result": game.result,
                     "start_fen": game.start_fen,
                     "n_plies": game.n_plies,
+                    "set": piece_set or "",
+                    "board": board or "",
+                    "device": device or "",
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
-        session = Session(session_id=session_id, game=game, out_dir=out_dir)
+        session = Session(
+            session_id=session_id,
+            game=game,
+            out_dir=out_dir,
+            piece_set=piece_set or None,
+            board=board or None,
+            device=device or None,
+        )
         sessions[session_id] = session
         return state_payload(session)
+
+    @app.get("/api/meta")
+    def meta() -> dict:
+        """Piece-set and board ids for the capture UI's Set/Board dropdowns."""
+        return _meta_options(out_root)
 
     @app.get("/api/session/{session_id}")
     def get_state(session_id: str) -> dict:

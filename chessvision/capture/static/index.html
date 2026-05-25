@@ -81,6 +81,17 @@
   .modal img { max-width: 92vw; max-height: 86vh; border-radius: 8px; }
   .modal .close { position: absolute; top: 16px; right: 20px; font-size: 26px; background: none; border: none; color: #fff; }
 
+  .picker-card { width: min(560px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
+                 background: #181c22; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .picker-card h3 { margin: 0; padding: 14px 16px; border-bottom: 1px solid var(--line); font-size: 16px; }
+  .picker-list { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .picker-item { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+                 width: 100%; text-align: left; padding: 12px 14px; background: #20262e;
+                 border: 1px solid var(--line); border-radius: 8px; color: var(--fg); cursor: pointer; }
+  .picker-item:hover { border-color: var(--accent); }
+  .picker-item .pi-meta { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .picker-empty { color: var(--muted); padding: 24px; text-align: center; }
+
   .toast { position: fixed; left: 50%; bottom: 110px; transform: translateX(-50%);
            background: #000a; border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px;
            opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; }
@@ -118,8 +129,9 @@
     <span class="title">♟ <span id="modeTitle">capture</span></span>
     <button id="modeBtn" title="Switch between labelling a known game and reading an unknown position">Read position →</button>
     <span class="capture-only">
-      <select id="gameSelect" title="Game"></select>
-      <button id="startBtn">Start</button>
+      <select id="setSelect" title="Piece set used (tagged onto the session)"></select>
+      <select id="boardSelect" title="Board used (tagged onto the session)"></select>
+      <button id="selectGameBtn" title="Choose a game from the loaded collection">Select game</button>
       <select id="puzzleTheme" title="Puzzle theme">
         <option value="middlegame">middlegame</option>
         <option value="any">any</option>
@@ -127,7 +139,7 @@
         <option value="endgame">endgame</option>
       </select>
       <button id="puzzleBtn" title="Fetch a fresh Lichess puzzle">Next puzzle</button>
-      <button id="finishBtn" title="Upload photos + metadata to S3 and create Label Studio tasks">Finish &amp; upload</button>
+      <button id="finishBtn" title="Upload now — only needed if you stop before the position is fully captured. A completed game/puzzle uploads automatically.">Finish &amp; upload</button>
     </span>
     <span class="spacer"></span>
     <span class="result-chip" id="resultChip"></span>
@@ -159,9 +171,9 @@
 
     <section class="pane">
       <span class="capture-only">
-        <h2>Target position</h2>
+        <h2 id="gameTitle" title="Current game / puzzle">No game selected</h2>
         <div class="board-wrap" id="board"></div>
-        <div class="instruction" id="instruction">Pick a game and press Start.</div>
+        <div class="instruction" id="instruction">Select a game or fetch a puzzle to begin.</div>
         <div class="board-controls">
           <button id="prevBtn" disabled>◀ Prev</button>
           <button id="nextBtn" disabled>Skip ▶</button>
@@ -190,6 +202,13 @@
   </footer>
 
   <div class="modal" id="modal"><button class="close" id="modalClose">×</button><img id="modalImg" alt="" /></div>
+
+  <div class="modal" id="gameModal">
+    <div class="picker-card">
+      <h3>Select game</h3>
+      <div class="picker-list" id="gameList"></div>
+    </div>
+  </div>
 
   <div class="corner-modal" id="cornerModal">
     <div class="corner-toolbar">
@@ -636,18 +655,64 @@ function setMode(m) {
 }
 
 /* ---------- session flow ---------- */
-async function loadGames() {
-  const games = await fetch("/api/games").then(j);
-  const sel = $("gameSelect");
-  sel.innerHTML = "";
+// Pick a game from the loaded collection in a modal. Fetched fresh each open so it
+// reflects any games added at launch; previously-fetched puzzles are filtered out
+// (puzzles are ephemeral — use "Next puzzle", not the picker, to get a new one).
+async function openGamePicker() {
+  const list = $("gameList");
+  list.innerHTML = '<div class="picker-empty">Loading…</div>';
+  $("gameModal").classList.add("show");
+  let games = [];
+  try { games = (await fetch("/api/games").then(j)).filter((g) => !g.game_id.startsWith("puzzle-")); }
+  catch (e) { list.innerHTML = `<div class="picker-empty">Could not load games: ${e.message}</div>`; return; }
+  if (!games.length) { list.innerHTML = '<div class="picker-empty">No games loaded. Launch with --pgn FILE.</div>'; return; }
+  list.innerHTML = "";
   games.forEach((g) => {
-    const o = document.createElement("option");
-    o.value = g.game_id; o.textContent = `${g.label}  ·  ${g.n_plies} plies`;
-    sel.appendChild(o);
+    const b = document.createElement("button");
+    b.className = "picker-item";
+    b.innerHTML = `<span class="pi-label"></span><span class="pi-meta">${g.n_plies} plies</span>`;
+    b.querySelector(".pi-label").textContent = g.label;  // textContent: don't trust labels as HTML
+    b.onclick = () => { closeGamePicker(); startSession(g.game_id).catch((e) => toast(e.message)); };
+    list.appendChild(b);
   });
 }
-async function startSession() {
-  state = await postForm("/api/session", { game_id: $("gameSelect").value });
+function closeGamePicker() { $("gameModal").classList.remove("show"); }
+// Set/Board options come from the server's sets.json/boards.json; the last pick is
+// remembered so a run of sessions on the same board needs no re-selection.
+async function loadMeta() {
+  try {
+    const m = await fetch("/api/meta").then(j);
+    fillMetaSelect("setSelect", m.sets, "cv_set");
+    fillMetaSelect("boardSelect", m.boards, "cv_board");
+  } catch { /* no metadata files -> selects stay empty, sessions just go untagged */ }
+}
+function fillMetaSelect(id, values, storeKey) {
+  const sel = $(id);
+  sel.innerHTML = "";
+  values.forEach((v) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v;
+    sel.appendChild(o);
+  });
+  const saved = localStorage.getItem(storeKey);
+  if (saved && values.includes(saved)) sel.value = saved;
+  sel.onchange = () => localStorage.setItem(storeKey, sel.value);
+}
+// The selected camera's human label, minus the trailing USB vendor:product id the
+// browser appends to disambiguate identical devices (e.g. " (046d:0982)").
+function currentCameraLabel() {
+  const sel = $("cameraSelect");
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt) return "";
+  return opt.textContent.replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)\s*$/i, "").trim();
+}
+async function startSession(gameId) {
+  state = await postForm("/api/session", {
+    game_id: gameId,
+    piece_set: $("setSelect").value,
+    board: $("boardSelect").value,
+    device: currentCameraLabel(),
+  });
   await applySavedCorners();
   render();
   toast("Session " + state.session_id);
@@ -659,12 +724,7 @@ async function nextPuzzle() {
   if (theme !== "endgame") fields.min_pieces = 20;  // bias toward dense, occlusion-heavy boards
   toast("Fetching puzzle…");
   const g = await postForm("/api/puzzles/next", fields);
-  const sel = $("gameSelect");
-  let o = [...sel.options].find((x) => x.value === g.game_id);
-  if (!o) { o = document.createElement("option"); o.value = g.game_id; sel.appendChild(o); }
-  o.textContent = `${g.label}  ·  ${g.n_plies} plies`;
-  sel.value = g.game_id;
-  await startSession();
+  await startSession(g.game_id);
 }
 async function goto(i) { if (state) { state = await postForm(`/api/session/${state.session_id}/goto`, { ply_index: i }); render(); } }
 async function flipView() {
@@ -695,6 +755,7 @@ async function finishSession(auto = false) {
 /* ---------- render ---------- */
 function render() {
   if (!state) return;
+  $("gameTitle").textContent = state.game.label;
   $("board").innerHTML = state.board_svg;
   const ply = state.ply;
   const instr = $("instruction");
@@ -785,7 +846,8 @@ function toast(msg) {
 }
 
 /* ---------- wiring ---------- */
-$("startBtn").onclick = () => startSession().catch((e) => toast(e.message));
+$("selectGameBtn").onclick = openGamePicker;
+$("gameModal").onclick = (e) => { if (e.target.id === "gameModal") closeGamePicker(); };
 $("puzzleBtn").onclick = () => nextPuzzle().catch((e) => toast(e.message));
 $("finishBtn").onclick = () => finishSession().catch((e) => toast(e.message));
 $("snapBtn").onclick = snap;
@@ -815,6 +877,7 @@ $("modal").onclick = (e) => { if (e.target.id === "modal") $("modal").classList.
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "SELECT") return;
   if (e.repeat) return;  // ignore auto-repeat from a held key (avoids double-snap / runaway nav)
+  if ($("gameModal").classList.contains("show")) { if (e.code === "Escape") closeGamePicker(); return; }
   if (cornerMode) {
     if (e.code === "Escape") cancelCornerMode();
     else if (e.code === "Enter" && cornerPts.length === 4) { e.preventDefault(); saveCorners().catch((err) => toast(err.message)); }
@@ -827,7 +890,7 @@ document.addEventListener("keydown", (e) => {
   else if (state && e.code === "ArrowRight") goto(state.ply_index + 1);
 });
 
-loadGames().catch((e) => toast(e.message));
+loadMeta();
 checkLiveAvailable().then(updateButtons);
 checkCornerAssist();
 listCameras();

@@ -26,6 +26,9 @@ from pathlib import Path
 _FEN_LETTERS = "prnbqk"
 _DEFAULT_RADIUS_SQUARES = 0.3
 
+# Domain-axis keys read off a per-session session.json (mirrors the sessions.json schema).
+_DOMAIN_KEYS = ("set", "board", "device", "lighting", "surface", "notes")
+
 # fen_letter -> (height_squares, radius_squares)
 BoxSizes = dict[str, tuple[float, float]]
 
@@ -78,6 +81,22 @@ class SessionMetadata:
             return _strip_comments(json.loads(path.read_text(encoding="utf-8")))
 
         sets, boards, sessions = read("sets.json"), read("boards.json"), read("sessions.json")
+
+        # Overlay per-session session.json (written by the capture app at session start):
+        # the set/board/device live with the session itself, so it is the source of truth.
+        # Only non-empty domain keys override, so a session.json carrying just game info
+        # never blanks a central entry (e.g. a held-out `notes` tag set centrally).
+        for sj in sorted(root.glob("*/session.json")):
+            try:
+                data = json.loads(sj.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            domain = {k: data[k] for k in _DOMAIN_KEYS if data.get(k)}
+            if domain:
+                sessions[sj.parent.name] = {**sessions.get(sj.parent.name, {}), **domain}
+
         if not (sets or boards or sessions):
             return None
         return cls(sets=sets, boards=boards, sessions=sessions)
