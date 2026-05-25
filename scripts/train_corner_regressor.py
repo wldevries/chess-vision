@@ -55,7 +55,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--weight-decay", type=float, default=1e-4)
     add("--hflip", type=float, default=0.5, help="train horizontal-flip probability")
     add("--jitter", type=float, default=0.1, help="train brightness/contrast jitter magnitude")
-    add("--workers", type=int, default=4, help="DataLoader workers (0 = main process)")
+    add("--workers", type=int, default=4, help="DataLoader workers (ignored when caching)")
+    add(
+        "--no-cache",
+        action="store_true",
+        help="disable the in-RAM image cache (re-decode every epoch; decode-bound)",
+    )
+    add("--cache-workers", type=int, default=8, help="threads to pre-warm the image cache")
     add("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     add("--amp", action="store_true", help="mixed precision (CUDA only)")
     add("--limit-train", type=int, default=None, help="cap train images (smoke tests)")
@@ -75,29 +81,43 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
     None when captures are disabled/absent. Train = ChessReD train (+ deduped capture
     poses); val = ChessReD val (the stable, diverse metric we select on); capture_eval =
     held-out capture poses (the honest 'works on your boards' number)."""
-    train_cfg = CornerConfig(image_size=args.image_size, hflip_prob=args.hflip, jitter=args.jitter)
-    eval_cfg = CornerConfig(image_size=args.image_size)
+    cache = not args.no_cache
+    train_cfg = CornerConfig(
+        image_size=args.image_size, hflip_prob=args.hflip, jitter=args.jitter, cache=cache
+    )
+    eval_cfg = CornerConfig(image_size=args.image_size, cache=cache)
 
     chess_train = ChessReDCorners.from_split(chessred, "train", config=train_cfg)
     if args.limit_train:
         chess_train.image_ids = chess_train.image_ids[: args.limit_train]
     val_ds = ChessReDCorners.from_split(chessred, "val", config=eval_cfg)
 
+    datasets = [chess_train, val_ds]
     train_ds: object = chess_train
     capture_eval_ds = None
     if not args.no_captures and args.captures_export.exists():
         cap_train, cap_heldout = select_capture_corner_poses(
             args.captures_export, dedup_thr=args.dedup_thr, max_per_pose=args.max_per_pose
         )
-        train_ds = ConcatDataset([chess_train, CaptureCorners(cap_train, train_cfg, train=True)])
+        cap_train_ds = CaptureCorners(cap_train, train_cfg, train=True)
         capture_eval_ds = CaptureCorners(cap_heldout, eval_cfg, train=False)
+        train_ds = ConcatDataset([chess_train, cap_train_ds])
+        datasets += [cap_train_ds, capture_eval_ds]
         print(f"captures: +{len(cap_train)} train poses | {len(cap_heldout)} held-out eval")
 
+    if cache:
+        print(f"pre-warming image cache ({args.cache_workers} threads)...", flush=True)
+        for ds in datasets:
+            ds.prewarm(max_workers=args.cache_workers)
+
+    # With the in-RAM cache the bottleneck is gone and the cache is per-process, so
+    # worker processes would only duplicate memory -- run single-process.
+    workers = 0 if cache else args.workers
     common = dict(
         collate_fn=collate_corners,
-        num_workers=args.workers,
+        num_workers=workers,
         pin_memory=True,
-        persistent_workers=args.workers > 0,
+        persistent_workers=workers > 0,
     )
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, **common)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, **common)

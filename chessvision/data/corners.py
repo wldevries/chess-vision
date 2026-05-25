@@ -51,6 +51,7 @@ class CornerConfig:
     image_size: int = 384  # square network input (board ~fills the 3072^2 ChessReD frame)
     hflip_prob: float = 0.0  # train-time horizontal flip probability
     jitter: float = 0.0  # train-time brightness/contrast jitter magnitude (0 disables)
+    cache: bool = False  # keep the resized image_size^2 array in RAM (decode each image once)
 
 
 def corners_to_array(corners: dict[str, Sequence[float]]) -> np.ndarray:
@@ -96,26 +97,75 @@ def augment_corners(
     return rgb, pts
 
 
-def build_corner_item(
-    rgb: np.ndarray, pts: np.ndarray, config: CornerConfig, train: bool, image_id: int
-):
-    """(rgb, normalized visual-slot corners) -> the `(image, target)` pair both the
-    ChessReD and capture corner datasets emit. Augments (if `train`) then resizes to
-    the square network input; the target keeps native `orig_size` for px-error eval."""
-    h0, w0 = rgb.shape[:2]
-    if train:
-        rgb, pts = augment_corners(rgb, pts, config)
-    inp = cv2.resize(rgb, (config.image_size, config.image_size), interpolation=cv2.INTER_AREA)
-    image = torch.from_numpy(np.ascontiguousarray(inp)).permute(2, 0, 1).float() / 255.0
-    target = {
-        "corners": torch.from_numpy(np.ascontiguousarray(pts)),
-        "image_id": torch.tensor([image_id], dtype=torch.int64),
-        "orig_size": torch.tensor([w0, h0], dtype=torch.int64),
-    }
-    return image, target
+class _CornerDataset(Dataset):
+    """Shared corner-dataset machinery: optional in-RAM cache + the `(image, target)`
+    finalize step. Subclasses implement `__len__`, `_image_id(idx)`, and
+    `_load_raw(idx) -> (rgb_full, normalized_pts, (w0, h0))`.
+
+    **Why the cache.** The images are huge (ChessReD is 3072^2 JPEGs) but the network
+    input is tiny (`image_size`^2). Without caching, every epoch re-reads and re-decodes
+    every image -- the run becomes decode-bound and the GPU idles (~340 s/epoch observed
+    for a 1.7M-param model). With `config.cache`, each image is decoded + resized **once**
+    and the small array is kept in RAM (~0.4 MB at 384^2), so later epochs are GPU-bound.
+    Augmentation still runs per-epoch on the cached resized array (flip + photometric
+    jitter are resolution-independent). Use `prewarm()` to fill the cache up front with a
+    thread pool (cv2 decode releases the GIL, so threads parallelize it).
+
+    The cache lives in the dataset object, so run with **DataLoader `num_workers=0`**: with
+    worker processes each worker would build its own separate cache (no sharing, N x memory).
+    """
+
+    def __init__(self, config: CornerConfig | None = None, train: bool = False):
+        self.config = config or CornerConfig()
+        self.train = train
+        self._cache: dict[int, tuple[np.ndarray, np.ndarray, tuple[int, int]]] = {}
+
+    def __len__(self) -> int:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def _image_id(self, idx: int) -> int:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def _load_raw(self, idx: int) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+        """Decode the full image and return (rgb_full, normalized visual-slot corners,
+        (w0, h0)). The expensive step that the cache exists to avoid repeating."""
+        raise NotImplementedError  # pragma: no cover - overridden
+
+    def _sized(self, idx: int) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+        """Resized (image_size^2) rgb + normalized pts + native (w0, h0), from cache."""
+        if idx in self._cache:
+            return self._cache[idx]
+        rgb, pts, owh = self._load_raw(idx)
+        size = self.config.image_size
+        rgb = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_AREA)
+        item = (np.ascontiguousarray(rgb), pts, owh)
+        if self.config.cache:
+            self._cache[idx] = item
+        return item
+
+    def prewarm(self, max_workers: int = 8) -> None:
+        """Fill the cache with a thread pool so the first epoch isn't decode-bound."""
+        if not self.config.cache:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            list(pool.map(self._sized, range(len(self))))
+
+    def __getitem__(self, idx: int):
+        rgb, pts, (w0, h0) = self._sized(idx)
+        if self.train:
+            rgb, pts = augment_corners(rgb, pts, self.config)
+        image = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float() / 255.0
+        target = {
+            "corners": torch.from_numpy(np.ascontiguousarray(pts)),
+            "image_id": torch.tensor([self._image_id(idx)], dtype=torch.int64),
+            "orig_size": torch.tensor([w0, h0], dtype=torch.int64),
+        }
+        return image, target
 
 
-class ChessReDCorners(Dataset):
+class ChessReDCorners(_CornerDataset):
     def __init__(
         self,
         chessred: ChessReD,
@@ -123,9 +173,8 @@ class ChessReDCorners(Dataset):
         config: CornerConfig | None = None,
         train: bool = False,
     ):
+        super().__init__(config, train)
         self.ds = chessred
-        self.config = config or CornerConfig()
-        self.train = train
         # Keep only images that actually carry corners (chessred2k all do; defensive).
         self.image_ids = [i for i in image_ids if self.ds.corners(i) is not None]
 
@@ -148,19 +197,19 @@ class ChessReDCorners(Dataset):
     def __len__(self) -> int:
         return len(self.image_ids)
 
-    def _read_rgb(self, image_id: int) -> np.ndarray:
+    def _image_id(self, idx: int) -> int:
+        return self.image_ids[idx]
+
+    def _load_raw(self, idx: int) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+        image_id = self.image_ids[idx]
         path = self.ds.resolve_image_path(self.ds.meta(image_id))
         bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if bgr is None:
             raise FileNotFoundError(f"could not read image {path}")
-        return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-
-    def __getitem__(self, idx: int):
-        image_id = self.image_ids[idx]
-        rgb = self._read_rgb(image_id)
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         h0, w0 = rgb.shape[:2]
         pts = corners_to_array(self.ds.corners(image_id)) / np.array([w0, h0], dtype=np.float32)
-        return build_corner_item(rgb, pts, self.config, self.train, image_id)
+        return rgb, pts, (w0, h0)
 
 
 # --------------------------------------------------------------------------- #
@@ -260,16 +309,15 @@ def select_capture_corner_poses(
     return train, heldout
 
 
-class CaptureCorners(Dataset):
+class CaptureCorners(_CornerDataset):
     """Corner dataset over capture samples, emitting the same `(image, target)` as
     `ChessReDCorners`. Image bytes load locally with an S3/MinIO fallback (see
     `chessvision.data.captures`). Build the sample lists with
     `select_capture_corner_poses` so geometry is deduped and splits don't leak."""
 
     def __init__(self, samples: list, config: CornerConfig | None = None, train: bool = False):
+        super().__init__(config, train)
         self.samples = list(samples)
-        self.config = config or CornerConfig()
-        self.train = train
         # S3 fallback config taken from any sample's parent dataset is not stored on the
         # sample, so resolve it from env once here (None -> local-only).
         from chessvision.data.captures import S3Config
@@ -279,9 +327,12 @@ class CaptureCorners(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int):
+    def _image_id(self, idx: int) -> int:
+        return self.samples[idx].task_id
+
+    def _load_raw(self, idx: int) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
         sample = self.samples[idx]
         rgb = sample.load_image(self.s3)
         h0, w0 = rgb.shape[:2]
         pts = corners_to_array(sample.corners) / np.array([w0, h0], dtype=np.float32)
-        return build_corner_item(rgb, pts, self.config, self.train, sample.task_id)
+        return rgb, pts, (w0, h0)
