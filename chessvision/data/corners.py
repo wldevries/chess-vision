@@ -424,9 +424,9 @@ class CaptureCorners(_CornerDataset):
         self.samples = list(samples)
         # S3 fallback config taken from any sample's parent dataset is not stored on the
         # sample, so resolve it from env once here (None -> local-only).
-        from chessvision.data.captures import S3Config
+        from chessvision.data.storage import StorageConfig
 
-        self.s3 = S3Config.from_env()
+        self.s3 = StorageConfig.try_from_env()
 
     def __len__(self) -> int:
         return len(self.samples)

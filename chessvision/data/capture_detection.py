@@ -31,8 +31,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from chessvision.data.captures import CaptureDataset, CaptureSample, S3Config
+from chessvision.data.captures import CaptureDataset, CaptureSample
 from chessvision.data.detection import DetectionConfig, augment_targets, resize_targets
+from chessvision.data.storage import StorageConfig
 from chessvision.geometry import (
     PIECE_HEIGHT_SCALE,
     Orientation,
@@ -123,7 +124,7 @@ class CaptureKeypointDetection(Dataset):
     def __init__(
         self,
         samples: Sequence[CaptureSample],
-        s3: S3Config | None = None,
+        s3: StorageConfig | None = None,
         config: CaptureKeypointConfig | None = None,
         train: bool = False,
     ):

@@ -23,8 +23,9 @@ import numpy as np
 import torch
 
 from chessvision.data.capture_detection import synthesize_piece_targets
-from chessvision.data.captures import CaptureSample, S3Config
+from chessvision.data.captures import CaptureSample
 from chessvision.data.detection import resize_targets
+from chessvision.data.storage import StorageConfig
 from chessvision.geometry import Orientation, compute_homography, square_for_point
 
 
@@ -49,7 +50,7 @@ def _gt_board(sample: CaptureSample) -> dict[str, int]:
 def evaluate_captures(
     model: torch.nn.Module,
     samples: Sequence[CaptureSample],
-    s3: S3Config | None,
+    s3: StorageConfig | None,
     device: torch.device,
     *,
     max_size: int = 1333,

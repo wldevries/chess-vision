@@ -34,9 +34,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from chessvision.data.captures import S3Config, _s3_client
 from chessvision.data.chessred import AnnotatedImage, ChessReD
 from chessvision.data.contact import contact_points, occluded_pieces
+from chessvision.data.storage import StorageConfig, get_client
 
 _CORNER_LS = {
     "top_left": "TopLeft",
@@ -176,10 +176,10 @@ def main(argv: list[str] | None = None) -> int:
 
     client = None
     if args.upload:
-        cfg = S3Config.from_env()
+        cfg = StorageConfig.try_from_env()
         if cfg is None:
             raise SystemExit("no MinIO creds in .env; cannot --upload")
-        client = _s3_client(cfg)
+        client = get_client(cfg)
 
     # What to physically upload: all chessred2k, or just the review batch.
     to_upload = (

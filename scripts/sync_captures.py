@@ -24,12 +24,12 @@ import json
 from pathlib import Path
 
 from chessvision.data import labelstudio as ls
+from chessvision.data.publish import put_task
 from chessvision.data.storage import (
     StorageConfig,
     download_prefix,
     get_bytes,
     get_client,
-    put_bytes,
     upload_dir,
 )
 
@@ -114,17 +114,18 @@ def run_tasks(args, config, client) -> int:
             print(f"  !! no image for {ikey}; skipping (run `down` first?)")
             skipped += 1
             continue
-        task = ls.build_task(
+        tkey = put_task(
+            client,
+            config,
+            session_id,
             record,
             size,
-            ls.image_uri(config.bucket, ikey),
+            captures_prefix=args.prefix,
+            tasks_prefix=args.tasks_prefix,
             model_version=args.model_version,
             include_boxes=args.with_boxes,
+            dry_run=args.dry_run,
         )
-        tkey = ls.task_key(args.tasks_prefix, session_id, filename)
-        if not args.dry_run:
-            body = json.dumps(task).encode("utf-8")
-            put_bytes(client, config.bucket, tkey, body, "application/json")
         print(f"  {'(dry-run) ' if args.dry_run else ''}{tkey}")
         built += 1
     print(f"{built} tasks built, {skipped} skipped")

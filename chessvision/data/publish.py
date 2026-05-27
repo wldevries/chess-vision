@@ -16,6 +16,43 @@ from chessvision.data import labelstudio as ls
 from chessvision.data.storage import StorageConfig, put_bytes, upload_dir
 
 
+def put_task(
+    client,
+    config: StorageConfig,
+    session_id: str,
+    record: dict,
+    image_size: tuple[int, int],
+    *,
+    captures_prefix: str = "captures",
+    tasks_prefix: str = "tasks",
+    model_version: str = ls.MODEL_VERSION,
+    include_boxes: bool = False,
+    dry_run: bool = False,
+) -> str | None:
+    """Build one Label Studio task for `record` and PUT it under `<tasks_prefix>/`.
+
+    Returns the task key (None if the record has no filename). The single
+    source of truth for the task shape + key, shared by `publish_session` and the
+    `sync_captures.py tasks` command. Tasks overwrite by key, so re-running is safe.
+    """
+    filename = record.get("filename")
+    if not filename:
+        return None
+    image_key = ls.image_key(captures_prefix, session_id, filename)
+    task = ls.build_task(
+        record,
+        image_size,
+        ls.image_uri(config.bucket, image_key),
+        model_version=model_version,
+        include_boxes=include_boxes,
+    )
+    task_key = ls.task_key(tasks_prefix, session_id, filename)
+    if not dry_run:
+        body = json.dumps(task).encode("utf-8")
+        put_bytes(client, config.bucket, task_key, body, "application/json")
+    return task_key
+
+
 def publish_session(
     out_dir: str | Path,
     session_id: str,
@@ -45,20 +82,15 @@ def publish_session(
         local_img = out_dir / filename
         if not local_img.exists():
             continue  # photo was deleted after capture; skip its task
-        image_key = ls.image_key(captures_prefix, session_id, filename)
-        task = ls.build_task(
+        put_task(
+            client,
+            config,
+            session_id,
             record,
             ls.image_size_from_path(local_img),
-            ls.image_uri(config.bucket, image_key),
+            captures_prefix=captures_prefix,
+            tasks_prefix=tasks_prefix,
             include_boxes=include_boxes,
-        )
-        body = json.dumps(task).encode("utf-8")
-        put_bytes(
-            client,
-            config.bucket,
-            ls.task_key(tasks_prefix, session_id, filename),
-            body,
-            "application/json",
         )
         n_tasks += 1
 

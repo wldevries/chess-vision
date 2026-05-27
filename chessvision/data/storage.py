@@ -21,6 +21,7 @@ import mimetypes
 import os
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import boto3
@@ -34,13 +35,22 @@ _BOTO_CONFIG = Config(signature_version="s3v4", s3={"addressing_style": "path"})
 
 @dataclass(frozen=True)
 class StorageConfig:
+    """MinIO connection info. Frozen (hashable + picklable) so it can key the
+    per-process client cache and ride into worker processes under spawn.
+
+    `bucket` is optional: sync/publish set it (and use the strict `from_env`),
+    while the read-only image-load fallback leaves it unset and parses the bucket
+    out of each `s3://bucket/key` URI instead."""
+
     endpoint_url: str
     access_key: str
     secret_key: str
-    bucket: str
+    bucket: str | None = None
 
     @classmethod
     def from_env(cls, *, load: bool = True) -> StorageConfig:
+        """Strict: require all four vars (incl. the bucket); raise if any is missing.
+        Used by the sync/publish paths, which must know the target bucket."""
         if load:
             load_dotenv()
         missing = [
@@ -65,9 +75,41 @@ class StorageConfig:
             bucket=os.environ["MINIO_BUCKET"],
         )
 
+    @classmethod
+    def try_from_env(cls, dotenv_path: str | Path | None = None) -> StorageConfig | None:
+        """Lenient: load `.env`, return None if the credentials aren't all present
+        (so callers can stay local-only). The bucket is optional here — the
+        read-fallback path takes it from each object's `s3://` URI."""
+        try:
+            load_dotenv(dotenv_path)  # no-op if the file is absent
+        except ModuleNotFoundError:
+            pass
+        endpoint = os.getenv("MINIO_ENDPOINT_URL")
+        access = os.getenv("MINIO_ACCESS_KEY")
+        secret = os.getenv("MINIO_SECRET_KEY")
+        if not (endpoint and access and secret):
+            return None
+        return cls(
+            endpoint_url=endpoint,
+            access_key=access,
+            secret_key=secret,
+            bucket=os.getenv("MINIO_BUCKET"),
+        )
 
+    def __repr__(self) -> str:  # never echo the secret
+        return (
+            f"StorageConfig(endpoint_url={self.endpoint_url!r}, "
+            f"access_key={self.access_key!r}, secret_key=***, bucket={self.bucket!r})"
+        )
+
+
+@cache
 def get_client(config: StorageConfig):
-    """A boto3 S3 client bound to the MinIO endpoint."""
+    """A boto3 S3 client bound to the MinIO endpoint.
+
+    Cached per (process, config): a spawned worker re-imports this module with an
+    empty cache and builds its own client, so no client is ever pickled. botocore
+    clients are safe to share across threads, which covers the thread-pool path."""
     return boto3.client(
         "s3",
         endpoint_url=config.endpoint_url,

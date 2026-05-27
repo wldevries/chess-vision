@@ -15,12 +15,12 @@ image size (0-100). We convert to absolute pixels on load.
 Image bytes: the export stores `s3://<bucket>/captures/<session>/<file>.jpg`. The
 loader prefers the **local** mirror under `<captures_root>/<session>/<file>.jpg`
 and **falls back to S3/MinIO** when the local file is absent. S3 credentials come
-from `.env` (see `S3Config.from_env`); the file is gitignored.
+from `.env` (see `StorageConfig.try_from_env`); the file is gitignored.
 
 Parallel loading: `CaptureDataset.load_images` decodes many images at once.
 Default is a thread pool (image load is I/O-bound: an S3 GET plus a JPEG decode).
 A process pool is also supported and is **Windows-safe** -- the worker
-(`_load_image_worker`) and everything sent to it (`_LoadSpec`, `S3Config`) are
+(`_load_image_worker`) and everything sent to it (`_LoadSpec`, `StorageConfig`) are
 module-level / frozen and therefore picklable under spawn, and the boto3 client
 is built lazily *inside* each worker (clients are not picklable) rather than
 shipped across the process boundary. When using a process pool on Windows, the
@@ -43,16 +43,16 @@ caller's entry point must be guarded by ``if __name__ == "__main__":``.
 from __future__ import annotations
 
 import json
-import os
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from functools import cache
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+from chessvision.data.storage import StorageConfig, get_client
 
 # Label Studio corner label -> the snake_case key geometry.py uses.
 _CORNER_KEY: dict[str, str] = {
@@ -85,55 +85,6 @@ PIECE_FEN: dict[str, str] = {
 # --------------------------------------------------------------------------- #
 
 
-@dataclass(frozen=True)
-class S3Config:
-    """S3/MinIO connection info. Frozen (hashable + picklable) so it can key the
-    per-process client cache and ride into worker processes under spawn."""
-
-    endpoint_url: str
-    access_key: str
-    secret_key: str
-
-    @classmethod
-    def from_env(cls, dotenv_path: str | Path | None = None) -> S3Config | None:
-        """Build from environment, loading `.env` first. Returns None if the
-        MinIO credentials aren't all present (so callers can stay local-only)."""
-        try:
-            from dotenv import load_dotenv
-
-            load_dotenv(dotenv_path)  # no-op if the file is absent
-        except ModuleNotFoundError:
-            pass
-        endpoint = os.getenv("MINIO_ENDPOINT_URL")
-        access = os.getenv("MINIO_ACCESS_KEY")
-        secret = os.getenv("MINIO_SECRET_KEY")
-        if not (endpoint and access and secret):
-            return None
-        return cls(endpoint_url=endpoint, access_key=access, secret_key=secret)
-
-    def __repr__(self) -> str:  # never echo the secret
-        return (
-            f"S3Config(endpoint_url={self.endpoint_url!r}, "
-            f"access_key={self.access_key!r}, secret_key=***)"
-        )
-
-
-@cache
-def _s3_client(config: S3Config):
-    """One boto3 client per (process, config). Cached per-process: a spawned
-    worker re-imports this module with an empty cache and builds its own client,
-    so no client is ever pickled. botocore clients are safe to share across
-    threads, which covers the thread-pool path."""
-    import boto3
-
-    return boto3.client(
-        "s3",
-        endpoint_url=config.endpoint_url,
-        aws_access_key_id=config.access_key,
-        aws_secret_access_key=config.secret_key,
-    )
-
-
 def _split_s3_uri(uri: str) -> tuple[str, str]:
     """`s3://bucket/path/to/obj.jpg` -> ("bucket", "path/to/obj.jpg")."""
     rest = uri.removeprefix("s3://")
@@ -141,7 +92,7 @@ def _split_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-def _read_bytes(local_path: str, s3_uri: str, s3: S3Config | None) -> bytes:
+def _read_bytes(local_path: str, s3_uri: str, s3: StorageConfig | None) -> bytes:
     """Local file if it exists, else an S3 GET. Raises if neither is reachable."""
     p = Path(local_path)
     if p.exists():
@@ -151,7 +102,7 @@ def _read_bytes(local_path: str, s3_uri: str, s3: S3Config | None) -> bytes:
             f"{local_path} not found locally and no S3 config given for {s3_uri}"
         )
     bucket, key = _split_s3_uri(s3_uri)
-    resp = _s3_client(s3).get_object(Bucket=bucket, Key=key)
+    resp = get_client(s3).get_object(Bucket=bucket, Key=key)
     return resp["Body"].read()
 
 
@@ -171,7 +122,7 @@ class _LoadSpec:
     task_id: int
     local_path: str
     s3_uri: str
-    s3: S3Config | None
+    s3: StorageConfig | None
 
 
 def _load_image_worker(spec: _LoadSpec) -> tuple[int, np.ndarray]:
@@ -213,11 +164,11 @@ class CaptureSample:
     def has_all_corners(self) -> bool:
         return set(self.corners) == CORNER_KEYS
 
-    def read_bytes(self, s3: S3Config | None = None) -> bytes:
+    def read_bytes(self, s3: StorageConfig | None = None) -> bytes:
         """Raw JPEG bytes: local file if present, else S3 fallback."""
         return _read_bytes(str(self.image_path), self.s3_uri, s3)
 
-    def load_image(self, s3: S3Config | None = None) -> np.ndarray:
+    def load_image(self, s3: StorageConfig | None = None) -> np.ndarray:
         """Decoded (H, W, 3) uint8 RGB image: local if present, else S3 fallback."""
         return _decode_rgb(self.read_bytes(s3))
 
@@ -227,27 +178,27 @@ class CaptureDataset:
     export_path: Path
     captures_root: Path
     samples: list[CaptureSample] = field(repr=False)
-    s3: S3Config | None = None  # used only when a local file is missing
+    s3: StorageConfig | None = None  # used only when a local file is missing
 
     @classmethod
     def load(
         cls,
         export_path: str | Path,
         captures_root: str | Path | None = None,
-        s3: S3Config | None = None,
+        s3: StorageConfig | None = None,
     ) -> CaptureDataset:
         """Parse the Label Studio export.
 
         `captures_root` defaults to the export's own directory, which is correct
         for the committed layout (`data/captures/label-studio.json` alongside the
-        `<session>/` image dirs). `s3` defaults to `S3Config.from_env()`, so the
-        S3 fallback is wired up automatically when `.env` holds MinIO creds and is
-        simply unavailable (local-only) otherwise.
+        `<session>/` image dirs). `s3` defaults to `StorageConfig.try_from_env()`,
+        so the S3 fallback is wired up automatically when `.env` holds MinIO creds
+        and is simply unavailable (local-only) otherwise.
         """
         export_path = Path(export_path)
         captures_root = Path(captures_root) if captures_root else export_path.parent
         if s3 is None:
-            s3 = S3Config.from_env()
+            s3 = StorageConfig.try_from_env()
         with export_path.open(encoding="utf-8") as fh:
             raw = json.load(fh)
         samples = [s for s in (cls._parse_task(t, captures_root) for t in raw) if s is not None]

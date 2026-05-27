@@ -10,9 +10,9 @@ import pytest
 from chessvision.data.captures import (
     CORNER_KEYS,
     CaptureDataset,
-    S3Config,
     _split_s3_uri,
 )
+from chessvision.data.storage import StorageConfig
 from chessvision.geometry import compute_homography, quad_area
 
 EXPORT = Path("data/captures/label-studio.json")
@@ -87,7 +87,7 @@ def test_sample_keeps_s3_uri(dataset: CaptureDataset):
 
 
 def test_s3config_repr_hides_secret():
-    cfg = S3Config(endpoint_url="http://h:9000", access_key="ak", secret_key="topsecret")
+    cfg = StorageConfig(endpoint_url="http://h:9000", access_key="ak", secret_key="topsecret")
     assert "topsecret" not in repr(cfg)
     assert "***" in repr(cfg)
 
