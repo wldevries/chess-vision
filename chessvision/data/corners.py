@@ -40,11 +40,18 @@ import torch
 from torch.utils.data import Dataset
 
 from chessvision.data.chessred import ChessReD
-from chessvision.geometry import order_corners
+from chessvision.geometry import CANONICAL_ANCHORS, order_corners
 
 # Output corner order: visual slots as a closed-ish ring (matches geometry.IMAGE_CORNER_RING).
 CORNER_ORDER: tuple[str, str, str, str] = ("top_left", "top_right", "bottom_right", "bottom_left")
 NUM_CORNERS = 4
+
+# 9x9 = 81 canonical lattice points in [0, 1]^2, row-major by (rank j, file i) -- the SAME
+# order as geometry.lattice_points, so target generation and inference H-fitting agree.
+LATTICE_CANONICAL: np.ndarray = np.array(
+    [[i / 8.0, j / 8.0] for j in range(9) for i in range(9)], dtype=np.float32
+)
+NUM_LATTICE = 81
 
 
 @dataclass
@@ -78,6 +85,48 @@ def corners_to_array(corners: dict[str, Sequence[float]]) -> np.ndarray:
     """
     ordered = order_corners(list(corners.values()))
     return np.array([ordered[k] for k in CORNER_ORDER], dtype=np.float32)
+
+
+def corners_to_lattice(corners4: np.ndarray) -> np.ndarray:
+    """Expand (4, 2) visual-slot corners (normalized) into the (81, 2) 9x9 grid lattice
+    via the planar homography the corners define.
+
+    Auto-generated geometric truth -- the interior intersections are the perspective
+    projection of the 4 labelled corners, so no extra labelling is needed (same idea as
+    the contact-point labels). Assumes a flat board: a physically warped board's interior
+    will deviate slightly from this planar projection.
+    """
+    # corners4 is CORNER_ORDER (TL, TR, BR, BL); reorder to canonical-anchor order
+    # (a8, h8, a1, h1) == (TL, TR, BL, BR) so getPerspectiveTransform maps canonical -> image.
+    dst = np.asarray(corners4, dtype=np.float32)[[0, 1, 3, 2]]
+    h = cv2.getPerspectiveTransform(CANONICAL_ANCHORS, dst)
+    pts = cv2.perspectiveTransform(LATTICE_CANONICAL.reshape(-1, 1, 2), h).reshape(-1, 2)
+    return pts.astype(np.float32)
+
+
+class LatticeTargets(Dataset):
+    """Wraps a corner dataset so each item's ``target["corners"]`` is the (81, 2) lattice
+    instead of the (4, 2) corners -- lets the lattice model reuse the whole 4-corner
+    training/eval stack unchanged (loss + per-point error are generic over point count).
+    Delegates to the base for caching/prewarm; the 81 points are derived from the base's
+    already-augmented 4 corners, so flip/geometric aug stay consistent for free.
+    """
+
+    def __init__(self, base: Dataset):
+        self.base = base
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def prewarm(self, *a, **k):
+        if hasattr(self.base, "prewarm"):
+            self.base.prewarm(*a, **k)
+
+    def __getitem__(self, idx: int):
+        image, target = self.base[idx]
+        target = dict(target)
+        target["corners"] = torch.from_numpy(corners_to_lattice(target["corners"].numpy()))
+        return image, target
 
 
 def collate_corners(batch):

@@ -34,7 +34,8 @@ import numpy as np
 import torch
 from torch import nn
 
-from chessvision.data.corners import CORNER_ORDER, NUM_CORNERS
+from chessvision.data.corners import CORNER_ORDER, LATTICE_CANONICAL, NUM_CORNERS
+from chessvision.geometry import CANONICAL_ANCHORS
 
 DEFAULT_BACKBONE = "mobilenet_v3_small"
 DEFAULT_IMAGE_SIZE = 384
@@ -206,3 +207,94 @@ def predict_corners(
     pred = model(tensor.unsqueeze(0).to(device))[0].cpu().numpy()  # (num_corners, 2) in [0, 1]
     pred = pred * np.array([w0, h0], dtype=np.float32)
     return {k: [float(x), float(y)] for k, (x, y) in zip(CORNER_ORDER, pred, strict=True)}
+
+
+# --------------------------------------------------------------------------- #
+# Lattice (81-point) inference: predict the 9x9 grid, fit H robustly over all
+# points (confidence-weighted), derive 4 corners for drop-in compatibility.
+# --------------------------------------------------------------------------- #
+
+
+def _softargmax_with_conf(heatmaps: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(B, K, H, W) -> (coords (B, K, 2) in [0, 1], conf (B, K)).
+
+    conf = 1 / spatial variance of the softmax map: a sharp, peaked heatmap is a
+    confident localization; a diffuse one (an occluded interior point, the warped
+    board middle) gets low confidence. No extra supervision -- it falls out of the
+    same softmax the soft-argmax already computes.
+    """
+    b, k, h, w = heatmaps.shape
+    prob = heatmaps.reshape(b, k, h * w).softmax(dim=-1).reshape(b, k, h, w)
+    device, dtype = heatmaps.device, heatmaps.dtype
+    xs = torch.linspace(0.0, 1.0, w, device=device, dtype=dtype)
+    ys = torch.linspace(0.0, 1.0, h, device=device, dtype=dtype)
+    px, py = prob.sum(dim=2), prob.sum(dim=3)  # marginals over rows / cols
+    ex = (px * xs).sum(dim=-1)
+    ey = (py * ys).sum(dim=-1)
+    var = (px * xs * xs).sum(dim=-1) - ex**2 + (py * ys * ys).sum(dim=-1) - ey**2
+    return torch.stack([ex, ey], dim=-1), 1.0 / (var + 1e-6)
+
+
+def predict_lattice(
+    model: CornerHeatmapNet,
+    rgb: np.ndarray,
+    device: str | torch.device = "cpu",
+    image_size: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Predict the 81 lattice points (native px, (81, 2)) and a per-point confidence (81,)."""
+    size = image_size or getattr(model, "image_size", DEFAULT_IMAGE_SIZE)
+    h0, w0 = rgb.shape[:2]
+    inp = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_AREA)
+    tensor = torch.from_numpy(np.ascontiguousarray(inp)).permute(2, 0, 1).float().div_(255.0)
+    with torch.no_grad():
+        coords, conf = _softargmax_with_conf(model.heatmaps(tensor.unsqueeze(0).to(device)))
+    pts = coords[0].cpu().numpy() * np.array([w0, h0], dtype=np.float32)
+    return pts.astype(np.float32), conf[0].cpu().numpy().astype(np.float32)
+
+
+def _normalize_pts(pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Hartley normalization (centroid to origin, mean distance sqrt(2)) for a stable DLT."""
+    c = pts.mean(axis=0)
+    d = np.sqrt(((pts - c) ** 2).sum(axis=1)).mean()
+    s = np.sqrt(2.0) / (d + 1e-12)
+    t = np.array([[s, 0, -s * c[0]], [0, s, -s * c[1]], [0, 0, 1.0]])
+    return (pts - c) * s, t
+
+
+def homography_from_lattice(points_px: np.ndarray, conf: np.ndarray | None = None) -> np.ndarray:
+    """Fit canonical->image H from the 81 lattice correspondences via a confidence-weighted
+    normalized DLT. Spreading the fit over 81 overdetermined points averages out per-point
+    noise (vs. a 4-corner fit with zero slack), and the confidence weights down-weight
+    uncertain points so one bad (occluded) intersection can't skew the whole grid.
+    Pass conf=None for an unweighted fit."""
+    src = LATTICE_CANONICAL.astype(np.float64)
+    dst = np.asarray(points_px, dtype=np.float64)
+    w = np.ones(len(src)) if conf is None else np.sqrt(np.clip(conf, 1e-6, None))
+    srcn, t_src = _normalize_pts(src)
+    dstn, t_dst = _normalize_pts(dst)
+    rows = []
+    for (x, y), (u, v), wi in zip(srcn, dstn, w, strict=True):
+        rows.append(wi * np.array([-x, -y, -1, 0, 0, 0, u * x, u * y, u]))
+        rows.append(wi * np.array([0, 0, 0, -x, -y, -1, v * x, v * y, v]))
+    _, _, vt = np.linalg.svd(np.asarray(rows))
+    h_norm = vt[-1].reshape(3, 3)
+    h = np.linalg.inv(t_dst) @ h_norm @ t_src
+    return (h / h[2, 2]).astype(np.float32)
+
+
+def corners_from_lattice(
+    model: CornerHeatmapNet,
+    rgb: np.ndarray,
+    device: str | torch.device = "cpu",
+    use_conf: bool = True,
+) -> dict[str, list[float]]:
+    """Drop-in replacement for `predict_corners` using the lattice model: predict 81 points,
+    fit a robust H, and read off the 4 board corners (project the canonical anchors a8/h8/a1/h1,
+    which land in visual TL/TR/BL/BR slots)."""
+    pts, conf = predict_lattice(model, rgb, device=device)
+    h = homography_from_lattice(pts, conf if use_conf else None)
+    anchors = cv2.perspectiveTransform(
+        CANONICAL_ANCHORS.reshape(-1, 1, 2).astype(np.float32), h
+    ).reshape(-1, 2)
+    keys = ("top_left", "top_right", "bottom_left", "bottom_right")
+    return {k: [float(x), float(y)] for k, (x, y) in zip(keys, anchors, strict=True)}

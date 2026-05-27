@@ -235,6 +235,7 @@ class CornerPredictor:
         self.ckpt = Path(ckpt)
         self._device = device
         self._model = None
+        self._is_lattice = False
 
     def _ensure_loaded(self):
         if self._model is not None:
@@ -247,10 +248,24 @@ class CornerPredictor:
             raise FileNotFoundError(f"corner checkpoint not found: {self.ckpt}")
         self._device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._model = load_corner_regressor(self.ckpt, self._device)
+        # An 81-point lattice checkpoint is decoded to corners by the (parameter-free) lattice
+        # head -- predict 81 grid points, fit H robustly over all of them, read off 4 corners.
+        # Auto-detected from num_corners so the app/UI path is identical for either model.
+        self._is_lattice = getattr(self._model, "num_corners", 4) != 4
 
     def predict(self, rgb: np.ndarray) -> CornerDict:
-        """Predict the 4 board corners for `rgb` (H, W, 3 uint8), in native pixels."""
+        """Predict the 4 board corners for `rgb` (H, W, 3 uint8), in native pixels.
+
+        For a lattice checkpoint this runs the robust 81-point->H->corners decode; for a
+        4-corner checkpoint it's the direct soft-argmax. Same `CornerDict` either way.
+        """
+        self._ensure_loaded()
+        rgb = np.ascontiguousarray(rgb)
+        if self._is_lattice:
+            from chessvision.corner_regressor import corners_from_lattice
+
+            return corners_from_lattice(self._model, rgb, device=self._device)
+
         from chessvision.corner_regressor import predict_corners
 
-        self._ensure_loaded()
-        return predict_corners(self._model, np.ascontiguousarray(rgb), self._device)
+        return predict_corners(self._model, rgb, self._device)

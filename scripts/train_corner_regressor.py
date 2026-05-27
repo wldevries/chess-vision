@@ -37,9 +37,12 @@ from chessvision.data.corner_capture import (
     select_corner_dataset_poses,
 )
 from chessvision.data.corners import (
+    NUM_CORNERS,
+    NUM_LATTICE,
     CaptureCorners,
     ChessReDCorners,
     CornerConfig,
+    LatticeTargets,
     _cluster_by_corners,
     collate_corners,
     select_capture_corner_poses,
@@ -88,6 +91,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="apply ImageNet mean/std normalization inside the model (--no-normalize to disable)",
+    )
+    add(
+        "--lattice",
+        action="store_true",
+        help="train the 81-point grid lattice instead of 4 corners (predicts every 9x9 "
+        "intersection; targets auto-derived from the labelled corners). Reuses the whole "
+        "stack -- loss/eval are generic over point count.",
     )
     add("--out-dir", type=Path, default=Path("runs/corners"))
     # Capture set (the user's own boards): added to train for board-appearance variety,
@@ -189,6 +199,16 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
 
     # With the in-RAM cache the bottleneck is gone and the cache is per-process, so
     # worker processes would only duplicate memory -- run single-process.
+    # Lattice mode: wrap the loader-facing datasets so targets become the 81-point grid.
+    # Prewarm already ran on the base datasets above; the wrap just expands 4 -> 81 on read.
+    if args.lattice:
+        train_ds = LatticeTargets(train_ds)
+        val_ds = LatticeTargets(val_ds)
+        capture_eval_ds = LatticeTargets(capture_eval_ds) if capture_eval_ds is not None else None
+        corner_ds_eval_ds = (
+            LatticeTargets(corner_ds_eval_ds) if corner_ds_eval_ds is not None else None
+        )
+
     workers = 0 if cache else args.workers
     common = dict(
         collate_fn=collate_corners,
@@ -280,7 +300,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"train {len(train_loader.dataset)} | val {len(val_loader.dataset)} | device {device}")
 
     model = build_corner_regressor(
-        backbone=args.backbone, pretrained=True, normalize=args.normalize
+        backbone=args.backbone,
+        pretrained=True,
+        num_corners=NUM_LATTICE if args.lattice else NUM_CORNERS,
+        normalize=args.normalize,
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
