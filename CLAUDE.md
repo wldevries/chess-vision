@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Phase 2 (piece detector)** — box-detector baseline **trained**: Faster R-CNN ResNet50-FPN v2 on the official chessred2k split, **best val mAP 0.864, mAP@50 0.999** (`chessvision/detector.py`, `chessvision/data/detection.py`, `scripts/train_detector.py`; weights in `runs/detector/best.pt`). This is a *box* detector, so its box→contact step is the **known weak link** — the next step is to **transplant a base-keypoint head** onto this trunk (see "Contact points" below).
 - **Contact points** — `chessvision/data/contact.py` generates the doctrine-pure base point (each piece's square center projected through the homography). **Visually validated** on the most-occluded boards (`scripts/build_occlusion_tasks.py --overlay-dir`): the point lands at the base even when the base is hidden. Key consequence: contact-point labels are **auto-generated geometric truth**, so the keypoint head needs **no manual labelling** — the S3/Label-Studio review loop is *optional QA*, not a training prerequisite.
 - **Phase 3 (corner regression)** — built: a compact soft-argmax heatmap localizer (`chessvision/corner_regressor.py`, `scripts/train_corner_regressor.py`; weights in `runs/corners/best.pt`). Also wired into the capture app as corner-assist (a "Predict" button pre-fills the corner handles). Trained on ChessReD + the user's captures; eval is reported per board (`cap_*` metrics).
+- **Corner-label mode (corner-capture)** — a *standalone* corner dataset (`data/corners/`, `chessvision/data/corner_capture.py`) fed by phone photos dumped in `data/corners/inbox/` and labelled in the web app (`--corners-root`): a date-grouped photo browser → the existing corner-marking grid (+ "Predict") → sticky Board tag → `data/corners/store/{images,labels.jsonl}`. EXIF is normalized **on label** so display/storage/training share one pixel frame. Deliberately separate from the capture set (corner-only, no FEN/Label-Studio). Folds into corner training via `--corners-root` (default on) as the `cds_*` eval + selection metric. The point is **viewpoint diversity** — see `corner-capture-mode.md`.
 - CUDA torch is pinned via the `cu128` index in `pyproject.toml` (`[tool.uv.sources]`); don't let a bare `uv pip install torch` drift it back to CPU. Keep Label Studio in a *separate* venv (it drags `opencv-python-headless`, which collides with our `opencv-python`).
 
 ## Commands
@@ -30,6 +31,11 @@ uv run python scripts/sync_captures.py annotations  # pull LS export bucket -> d
 # Read-position (live FEN, Phase 4) mode in the web app: camera -> mark corners -> predicted FEN.
 # OFF unless a keypoint checkpoint is passed; toggle "Read position" in the header.
 uv run python -m chessvision.capture --keypoint-ckpt runs/keypoint_captures/best.pt
+
+# Corner-label mode: dump phone photos in data/corners/inbox/, then label corners in-app.
+# Toggle "Label corners" in the header; --corner-ckpt also enables the "Predict" prefill.
+uv run python -m chessvision.capture --corners-root data/corners --corner-ckpt runs/corners/best.pt
+uv run python scripts/sync_captures.py up --local data/corners/store --prefix corners  # back up labels+images
 ```
 
 Read-position mode glue is `chessvision/inference.py` (`LivePredictor`/`build_prediction`)

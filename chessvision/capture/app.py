@@ -20,7 +20,7 @@ import chess.svg
 import cv2
 import numpy as np
 from fastapi import FastAPI, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -56,6 +56,18 @@ class CornersIn(BaseModel):
             "bottom_right": list(self.bottom_right),
             "bottom_left": list(self.bottom_left),
         }
+
+
+class CornerLabelIn(BaseModel):
+    """A saved corner label for an inbox photo (corner-label mode). `corners` are four
+    [x, y] points in the *normalized* (EXIF-applied) image frame, any order — sorted
+    server-side. `src` is the inbox-relative path of the photo being labelled."""
+
+    src: str
+    corners: list[tuple[float, float]]
+    board: str | None = None
+    device: str | None = None
+    surface: str | None = None
 
 
 class SessionMetaIn(BaseModel):
@@ -231,11 +243,22 @@ def create_app(
     device: str | None = None,
     predictor=None,
     corner_predictor=None,
+    corners_root: str | Path | None = None,
+    corner_store=None,
 ) -> FastAPI:
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
     games_by_id = {g.game_id: g for g in games}
     sessions: dict[str, Session] = {}
+
+    # Corner-label mode: an import-and-label flow over phone photos staged in a
+    # `data/corners/inbox/` tree, writing a standalone corner dataset (no FEN / Label
+    # Studio). Off unless a corners root is provided; a pre-built store can be injected
+    # for tests. See chessvision/data/corner_capture.py and corner-capture-mode.md.
+    if corner_store is None and corners_root is not None:
+        from chessvision.data.corner_capture import CornerStore
+
+        corner_store = CornerStore(corners_root)
 
     # Read-position (live FEN) mode. The predictor is constructed cheaply -- the
     # model + torch only load on the first /api/live/predict call -- so the app
@@ -675,6 +698,69 @@ def create_app(
         except Exception as exc:  # model failure -> 500 with the reason
             raise HTTPException(500, f"corner prediction failed: {exc}") from exc
         return {"corners": corners}
+
+    @app.get("/api/corners-label/available")
+    def corner_label_available() -> dict:
+        """Whether corner-label mode is wired (launched with --corners-root) and whether
+        corner-assist prediction is also available (--corner-ckpt)."""
+        return {"available": corner_store is not None, "predict": corner_predictor is not None}
+
+    def _require_corner_store():
+        if corner_store is None:
+            raise HTTPException(503, "Corner-label mode is off (launch with --corners-root)")
+        return corner_store
+
+    @app.get("/api/corners-label/inbox")
+    def corner_label_inbox() -> list[dict]:
+        """Every decodable inbox photo, date-ordered, with its labelled state — drives
+        the photo browser. The `group` is the immediate parent folder for a hierarchical,
+        date-named listing."""
+        store = _require_corner_store()
+        return [
+            {
+                "id": p.id,
+                "src": p.src,
+                "group": p.group,
+                "date": p.date,
+                "labeled": p.labeled,
+                "board": p.board,
+                "corners": p.corners,
+            }
+            for p in store.list_inbox()
+        ]
+
+    @app.get("/api/corners-label/image")
+    def corner_label_image(src: str, w: int | None = None) -> Response:
+        """The EXIF-normalized JPEG for an inbox photo — the exact pixels the marking
+        grid is drawn on and the corners are stored against. `w` downscales for thumbnails."""
+        store = _require_corner_store()
+        try:
+            data = store.normalized_bytes(src, max_width=w)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:  # decode failure -> surface the reason
+            raise HTTPException(400, f"could not read image: {exc}") from exc
+        return Response(content=data, media_type="image/jpeg")
+
+    @app.post("/api/corners-label/save")
+    def corner_label_save(body: CornerLabelIn) -> dict:
+        """Normalize the inbox photo, store its JPEG, and upsert its corner label."""
+        store = _require_corner_store()
+        if len(body.corners) != 4:
+            raise HTTPException(400, "corners must be exactly four [x, y] points")
+        try:
+            label = store.save_label(
+                body.src,
+                body.corners,
+                board=body.board or "",
+                device=body.device or "",
+                surface=body.surface or "",
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:  # save / encode failure
+            raise HTTPException(500, f"save failed: {exc}") from exc
+        return {"id": label.id, "src": label.src, "board": label.board, "labeled": True}
 
     @app.exception_handler(HTTPException)
     async def _http_error(_request, exc: HTTPException) -> JSONResponse:

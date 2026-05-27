@@ -1,7 +1,42 @@
 # Plan: a dedicated corner-capture mode
 
-Status: proposed (2026-05-25). Companion to `plan.md` (Phase 3 board localizer) and the
-capture app (`chessvision/capture`). Motivated by a measured bottleneck, not a hunch.
+Status: **built (2026-05-27)** as a *standalone* dataset, revising the original proposal
+(2026-05-25). Companion to `plan.md` (Phase 3 board localizer) and the capture app
+(`chessvision/capture`). Motivated by a measured bottleneck, not a hunch.
+
+## 0. What was built (supersedes §5–§7 below)
+
+The labelling tool was built as a **separate corner dataset under `data/corners/`**, not
+folded into the capture store / Label Studio (the §5–§6 approach). Decision: corner data
+is corner-only and needs no FEN/piece/LS machinery, and routing it through the captures
+bucket + `label-studio.json` would couple labelling to MinIO and the piece-label shape for
+no benefit. So:
+
+- **Dataset & store** — `chessvision/data/corner_capture.py`. Layout `data/corners/`:
+  `inbox/` (raw phone dumps, subfolders OK, local-only — `/data/` is gitignored) and
+  `store/` (`images/<id>.jpg` EXIF-normalized JPEGs + `labels.jsonl`, the trainable
+  artifact). `CornerStore` lists the inbox (date-ordered, labelled-state), normalizes EXIF
+  **on label** (one pixel frame for display + storage + training), and upserts label rows.
+- **Web app — corner-label mode** (`--corners-root data/corners`). A third mode beside
+  capture/read: a date-grouped photo browser; clicking a photo opens the **existing**
+  corner modal (perspective 9×9 grid, draggable handles, "Predict" corner-assist) seeded
+  from the normalized still; a **sticky Board dropdown** (boards.json, remembered) tags
+  each frame; Save writes to the store and auto-advances to the next unlabelled photo.
+  Endpoints: `/api/corners-label/{available,inbox,image,save}` in `chessvision/capture/app.py`.
+- **Training** — `train_corner_regressor.py --corners-root data/corners` (on by default;
+  `--no-corner-ds` to disable). `select_corner_dataset_poses` reuses the per-board,
+  by-pose split (anti-leak). Its held-out poses are the new `cds_*` eval and the
+  checkpoint-selection metric (preferred over `cap_*`).
+- **Sync** — no new code: `uv run python scripts/sync_captures.py up --local data/corners/store --prefix corners` (labels.jsonl isn't a derived sidecar, so it travels).
+
+**Follow-on (not built):** an offline position-capture flow (shoot per-ply, assign a game
+from the PGN catalog, project pieces from the FEN) using a *separate* inbox, never
+auto-promoted to `data/captures`. See the memory `decoupled-capture-from-inbox`.
+
+---
+
+## Original proposal (2026-05-25)
+
 
 ## 1. Problem
 

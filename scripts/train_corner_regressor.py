@@ -31,6 +31,11 @@ from torch.utils.data import ConcatDataset, DataLoader
 
 from chessvision.corner_regressor import build_corner_regressor, save_corner_checkpoint
 from chessvision.data.chessred import ChessReD
+from chessvision.data.corner_capture import (
+    CornerCaptureDataset,
+    CornerStore,
+    select_corner_dataset_poses,
+)
 from chessvision.data.corners import (
     CaptureCorners,
     ChessReDCorners,
@@ -92,14 +97,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--dedup-thr", type=float, default=0.02, help="distinct-pose threshold (frac of img size)")
     add("--max-per-pose", type=int, default=2, help="frames kept per distinct corner pose")
     add("--val-frac", type=float, default=0.25, help="share of each board's poses held out")
+    # Standalone corner dataset (phone photos labelled in the app, corner-only). Its
+    # held-out poses become the `cds_*` eval and the checkpoint-selection metric when
+    # present -- the larger, viewpoint-diverse "works on your boards" number. See
+    # chessvision/data/corner_capture.py and corner-capture-mode.md.
+    add("--corners-root", type=Path, default=Path("data/corners"), help="corner-dataset root")
+    add("--no-corner-ds", action="store_true", help="ignore the standalone corner dataset")
     return p.parse_args(argv)
 
 
 def build_loaders(args: argparse.Namespace, chessred: ChessReD):
-    """Returns (train_loader, val_loader, capture_eval_loader). The capture loaders are
-    None when captures are disabled/absent. Train = ChessReD train (+ deduped capture
-    poses); val = ChessReD val (the stable, diverse metric we select on); capture_eval =
-    held-out capture poses (the honest 'works on your boards' number)."""
+    """Returns (train_loader, val_loader, capture_eval_loader, corner_ds_eval_loader). The
+    capture / corner-ds loaders are None when disabled/absent. Train = ChessReD train
+    (+ deduped capture poses + corner-dataset poses); val = ChessReD val (the stable,
+    diverse metric); capture_eval / corner_ds_eval = held-out poses (the honest 'works on
+    your boards' numbers)."""
     cache = not args.no_cache
     train_cfg = CornerConfig(
         image_size=args.image_size,
@@ -121,7 +133,7 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
     val_ds = ChessReDCorners.from_split(chessred, "val", config=eval_cfg)
 
     datasets = [chess_train, val_ds]
-    train_ds: object = chess_train
+    train_parts: list = [chess_train]
     capture_eval_ds = None
     if not args.no_captures and args.captures_export.exists():
         cap_train, cap_heldout = select_capture_corner_poses(
@@ -132,7 +144,7 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
         )
         cap_train_ds = CaptureCorners(cap_train, train_cfg, train=True)
         capture_eval_ds = CaptureCorners(cap_heldout, eval_cfg, train=False)
-        train_ds = ConcatDataset([chess_train, cap_train_ds])
+        train_parts.append(cap_train_ds)
         datasets += [cap_train_ds, capture_eval_ds]
         # Report frames AND distinct corner poses: the eval's real sample size is poses
         # (near-duplicate frames of one camera setup aren't independent), so the pose
@@ -143,6 +155,32 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
             f"captures: +{len(cap_train)} train frames ({n_train_poses} poses) | "
             f"{len(cap_heldout)} held-out frames ({n_heldout_poses} poses)"
         )
+
+    # The standalone corner dataset (phone photos, corner-only). Same pose-deduped
+    # train + held-out-by-board split, its own loader so the `cds_*` eval is separate.
+    corner_ds_eval_ds = None
+    if not args.no_corner_ds:
+        store = CornerStore(args.corners_root)
+        cds_samples = store.samples()
+        if cds_samples:
+            cds_train, cds_heldout = select_corner_dataset_poses(
+                store,
+                dedup_thr=args.dedup_thr,
+                max_per_pose=args.max_per_pose,
+                val_frac=args.val_frac,
+            )
+            cds_train_ds = CornerCaptureDataset(cds_train, store, train_cfg, train=True)
+            corner_ds_eval_ds = CornerCaptureDataset(cds_heldout, store, eval_cfg, train=False)
+            train_parts.append(cds_train_ds)
+            datasets += [cds_train_ds, corner_ds_eval_ds]
+            n_train_poses = len(_cluster_by_corners(cds_train, args.dedup_thr))
+            n_heldout_poses = len(_cluster_by_corners(cds_heldout, args.dedup_thr))
+            print(
+                f"corner-ds: +{len(cds_train)} train frames ({n_train_poses} poses) | "
+                f"{len(cds_heldout)} held-out frames ({n_heldout_poses} poses)"
+            )
+
+    train_ds: object = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
 
     if cache:
         print(f"pre-warming image cache ({args.cache_workers} threads)...", flush=True)
@@ -165,7 +203,12 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
         if capture_eval_ds is not None
         else None
     )
-    return train_loader, val_loader, capture_eval_loader
+    corner_ds_eval_loader = (
+        DataLoader(corner_ds_eval_ds, batch_size=args.batch_size, shuffle=False, **common)
+        if corner_ds_eval_ds is not None
+        else None
+    )
+    return train_loader, val_loader, capture_eval_loader, corner_ds_eval_loader
 
 
 def train_one_epoch(model, loader, optimizer, device, scaler, epoch) -> float:
@@ -233,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     chessred = ChessReD.load(args.data_root, args.images_root)
-    train_loader, val_loader, capture_loader = build_loaders(args, chessred)
+    train_loader, val_loader, capture_loader, corner_ds_loader = build_loaders(args, chessred)
     print(f"train {len(train_loader.dataset)} | val {len(val_loader.dataset)} | device {device}")
 
     model = build_corner_regressor(
@@ -243,11 +286,17 @@ def main(argv: list[str] | None = None) -> int:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler() if (args.amp and device.type == "cuda") else None
 
-    # Select best.pt on the captures (your real boards) when present: chessred2k is a
-    # single foldable board, so its val is a same-board *memorization* metric that can
-    # move opposite to generalization (augmentation lowers cap error while raising
-    # ChessReD val). Fall back to ChessReD val only when captures are absent.
-    select_name = "cap_mean" if capture_loader is not None else "val_mean"
+    # Select best.pt on your real boards when present: chessred2k is a single foldable
+    # board, so its val is a same-board *memorization* metric that can move opposite to
+    # generalization. Prefer the standalone corner dataset (most viewpoint-diverse), then
+    # captures, then fall back to ChessReD val only when neither is present.
+    select_name = (
+        "cds_mean"
+        if corner_ds_loader is not None
+        else "cap_mean"
+        if capture_loader is not None
+        else "val_mean"
+    )
     history = []
     best_err = float("inf")
     for epoch in range(1, args.epochs + 1):
@@ -263,6 +312,10 @@ def main(argv: list[str] | None = None) -> int:
                 cap = evaluate(model, capture_loader, device)
                 row.update({f"cap_{k}": round(v, 5) for k, v in cap.items()})
                 select_err = cap["mean_corner_err"]
+            if corner_ds_loader is not None:
+                cds = evaluate(model, corner_ds_loader, device)
+                row.update({f"cds_{k}": round(v, 5) for k, v in cds.items()})
+                select_err = cds["mean_corner_err"]
             if select_err < best_err:
                 best_err = select_err
                 save_corner_checkpoint(

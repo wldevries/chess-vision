@@ -141,12 +141,39 @@
                           padding: 10px 14px; font-weight: 700; }
   .instruction.complete .move-label { color: #06210f; }
 
-  /* Mode switching: capture (label a known game) vs read (predict an unknown one). */
+  /* Mode switching: capture (label a known game) vs read (predict an unknown one)
+     vs corners (label board corners on staged phone photos). */
   .capture-only { display: contents; }
   .read-only { display: none; }
+  .corners-only { display: none; }
   body.mode-read .capture-only { display: none; }
   body.mode-read .read-only { display: contents; }
+  body.mode-corners .capture-only, body.mode-corners .read-only { display: none; }
+  body.mode-corners .live-pane { display: none; }
+  body.mode-corners #cornersPane.corners-only { display: flex; }
+  body.mode-corners select.corners-only { display: inline-block; }
+  body.mode-corners main { grid-template-columns: 1fr; }
   header .title .mode-tag { color: var(--accent); font-weight: 700; }
+
+  /* Corner inbox browser */
+  .corner-browser { flex: 1; min-height: 0; overflow-y: auto; padding: 4px; }
+  .corner-browser .cb-empty { color: var(--muted); padding: 24px; text-align: center; }
+  .cb-group-head { color: var(--muted); font-size: 13px; text-transform: uppercase;
+                   letter-spacing: .06em; margin: 14px 4px 8px; position: sticky; top: 0;
+                   background: var(--panel); padding: 4px 0; }
+  .cb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+  .cb-thumb { position: relative; border: 1px solid var(--line); border-radius: 10px;
+              overflow: hidden; background: #000; cursor: pointer; aspect-ratio: 4/3; }
+  .cb-thumb:hover { border-color: var(--accent); }
+  .cb-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cb-thumb.done { border-color: var(--good); }
+  .cb-badge { position: absolute; top: 6px; right: 6px; font-size: 12px; font-weight: 700;
+              padding: 2px 7px; border-radius: 999px; background: #000a; color: var(--fg); }
+  .cb-thumb.done .cb-badge { background: var(--good); color: #06210f; }
+  .cb-tag { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; padding: 2px 6px;
+            background: rgba(0,0,0,.6); color: #fff; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; }
+  .corner-toolbar select { max-width: 220px; }
 
   .fen-row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
   .fen-row input { flex: 1; min-width: 0; font: 13px/1.3 ui-monospace, monospace; color: var(--fg);
@@ -160,6 +187,7 @@
   <header>
     <span class="title">♟ <span id="modeTitle">capture</span></span>
     <button id="modeBtn" title="Switch between labelling a known game and reading an unknown position">Read position →</button>
+    <button id="cornersBtn" hidden title="Label board corners on staged phone photos">Label corners ⊹</button>
     <span class="capture-only">
       <select id="setSelect" title="Piece set used (tagged onto the session)"></select>
       <select id="boardSelect" title="Board used (tagged onto the session)"></select>
@@ -180,7 +208,14 @@
   </header>
 
   <main>
-    <section class="pane">
+    <section class="pane corners-only" id="cornersPane">
+      <h2>Corner inbox <span class="muted" id="cornerProgress"></span></h2>
+      <div class="corner-browser" id="cornerBrowser">
+        <div class="cb-empty">Drop phone photos into the inbox folder, then reload.</div>
+      </div>
+    </section>
+
+    <section class="pane live-pane">
       <h2>Camera</h2>
       <div class="cam-row grow">
         <select id="cameraSelect" title="Camera"></select>
@@ -202,7 +237,7 @@
       </div>
     </section>
 
-    <section class="pane">
+    <section class="pane live-pane">
       <span class="capture-only">
         <h2 id="gameTitle" title="Current game / puzzle">No game selected</h2>
         <div class="board-wrap" id="board"></div>
@@ -259,6 +294,7 @@
   <div class="corner-modal" id="cornerModal">
     <div class="corner-toolbar">
       <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
+      <select id="cornerBoard" class="corners-only" title="Board for this photo (remembered)"></select>
       <button id="predictCorner" hidden>Predict</button>
       <button id="undoCorner">Undo</button>
       <button id="cancelCorner">Cancel</button>
@@ -387,7 +423,7 @@ function enterCornerMode() {
   requestAnimationFrame(redrawCorners);
 }
 function cancelCornerMode() {
-  cornerMode = false; cornerPts = []; frozen = null; dragging = null;
+  cornerMode = false; cornerPts = []; frozen = null; dragging = null; cornerLabel.src = null;
   $("cornerModal").classList.remove("show");
   updateButtons();
 }
@@ -510,6 +546,11 @@ function redrawCorners() {
 }
 async function saveCorners() {
   if (cornerPts.length !== 4) return;
+  if (mode === "corners") {
+    try { await saveCornerLabel(); }
+    catch (e) { toast("Save failed: " + e.message); }
+    return;
+  }
   if (mode === "read") {
     live.corners = cornerPts.slice();
     localStorage.setItem(liveCornerKey(), JSON.stringify(live.corners));
@@ -645,6 +686,106 @@ async function predictCorners() {
   $("predictCorner").disabled = false;
 }
 
+/* ---------- corner-label mode (label staged phone photos) ---------- */
+// Mirrors the live corner-marking flow but over still photos from a staging inbox.
+// The same modal + perspective grid + Predict are reused; only the `frozen` canvas
+// source (a loaded photo, not the video) and the save target differ.
+let cornerLabel = { available: false, predict: false, photos: [], src: null };
+
+async function checkCornerLabel() {
+  try {
+    const r = await fetch("/api/corners-label/available").then(j);
+    cornerLabel.available = r.available; cornerLabel.predict = r.predict;
+  } catch { cornerLabel.available = false; }
+  $("cornersBtn").hidden = !cornerLabel.available;
+  if (cornerLabel.available) loadCornerBoards();
+}
+async function loadCornerBoards() {
+  try {
+    const m = await fetch("/api/meta").then(j);
+    const sel = $("cornerBoard"); sel.innerHTML = "";
+    const blank = document.createElement("option"); blank.value = ""; blank.textContent = "(board?)"; sel.appendChild(blank);
+    m.boards.forEach((v) => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
+    const saved = localStorage.getItem("cv_corner_board");
+    if (saved && m.boards.includes(saved)) sel.value = saved;
+    sel.onchange = () => localStorage.setItem("cv_corner_board", sel.value);
+  } catch { /* no boards.json -> stays blank, photos go untagged */ }
+}
+async function loadCornerInbox() {
+  const el = $("cornerBrowser");
+  el.innerHTML = '<div class="cb-empty">Loading…</div>';
+  try { cornerLabel.photos = await fetch("/api/corners-label/inbox").then(j); }
+  catch (e) { el.innerHTML = `<div class="cb-empty">Load failed: ${e.message}</div>`; return; }
+  renderCornerBrowser();
+}
+function updateCornerProgress() {
+  const ps = cornerLabel.photos, n = ps.filter((p) => p.labeled).length;
+  $("cornerProgress").textContent = ps.length ? `· ${n}/${ps.length} labelled` : "";
+}
+function cornerThumb(p) {
+  const d = document.createElement("div");
+  d.className = "cb-thumb" + (p.labeled ? " done" : "");
+  const img = document.createElement("img"); img.loading = "lazy"; img.alt = "";
+  img.src = `/api/corners-label/image?w=240&src=${encodeURIComponent(p.src)}`;
+  const badge = document.createElement("span"); badge.className = "cb-badge"; badge.textContent = p.labeled ? "✓" : "·";
+  const tag = document.createElement("span"); tag.className = "cb-tag";
+  tag.textContent = p.src.split("/").pop() + (p.board ? ` · ${p.board}` : "");
+  d.append(img, badge, tag);
+  d.onclick = () => enterCornerLabelMode(p);
+  return d;
+}
+function renderCornerBrowser() {
+  const el = $("cornerBrowser"), photos = cornerLabel.photos;
+  if (!photos.length) {
+    el.innerHTML = '<div class="cb-empty">No photos in the inbox. Drop images into the inbox folder and reload.</div>';
+    updateCornerProgress(); return;
+  }
+  // Group by folder/date, preserving the server's date order.
+  const order = [], byKey = {};
+  photos.forEach((p) => { const k = p.group || "(inbox root)"; if (!byKey[k]) { byKey[k] = []; order.push(k); } byKey[k].push(p); });
+  el.innerHTML = "";
+  order.forEach((k) => {
+    const head = document.createElement("div"); head.className = "cb-group-head"; head.textContent = k; el.appendChild(head);
+    const grid = document.createElement("div"); grid.className = "cb-grid";
+    byKey[k].forEach((p) => grid.appendChild(cornerThumb(p)));
+    el.appendChild(grid);
+  });
+  updateCornerProgress();
+}
+// Open the marking modal on a still photo. Loads the EXIF-normalized image (the same
+// pixels the corners are stored against), seeds handles from any saved corners.
+function enterCornerLabelMode(photo) {
+  const img = new Image();
+  img.onload = () => {
+    frozen = document.createElement("canvas");
+    frozen.width = img.naturalWidth; frozen.height = img.naturalHeight;
+    frozen.getContext("2d").drawImage(img, 0, 0);
+    cornerLabel.src = photo.src;
+    cornerPts = (photo.corners && photo.corners.length === 4) ? photo.corners.map((p) => p.slice()) : [];
+    cornerMode = true; dragging = null;
+    $("cornerModal").classList.add("show");
+    requestAnimationFrame(redrawCorners);
+  };
+  img.onerror = () => toast("Could not load photo");
+  img.src = `/api/corners-label/image?src=${encodeURIComponent(photo.src)}`;
+}
+async function saveCornerLabel() {
+  const o = orderCorners(cornerPts);
+  const board = $("cornerBoard").value || "";
+  await postJson("/api/corners-label/save", {
+    src: cornerLabel.src, corners: [o.tl, o.tr, o.br, o.bl], board,
+  });
+  // Reflect the new state locally, then auto-advance to the next unlabelled photo.
+  const cur = cornerLabel.photos.find((p) => p.src === cornerLabel.src);
+  if (cur) { cur.labeled = true; cur.board = board; cur.corners = [o.tl, o.tr, o.br, o.bl]; }
+  renderCornerBrowser();
+  const idx = cornerLabel.photos.findIndex((p) => p.src === cornerLabel.src);
+  const next = cornerLabel.photos.slice(idx + 1).find((p) => !p.labeled)
+    || cornerLabel.photos.find((p) => !p.labeled);
+  if (next) { enterCornerLabelMode(next); toast("Saved ✓ — next"); }
+  else { cancelCornerMode(); toast("All photos labelled ✓"); }
+}
+
 /* ---------- read position (live FEN) ---------- */
 async function checkLiveAvailable() {
   try { live.available = (await fetch("/api/live/available").then(j)).available; }
@@ -696,12 +837,17 @@ async function copyFen() {
 function setMode(m) {
   if (m === mode) return;
   if (m === "read" && !live.available) return toast("Read-position mode is off (launch with --keypoint-ckpt)");
+  if (m === "corners" && !cornerLabel.available) return toast("Corner-label mode is off (launch with --corners-root)");
   cancelCornerMode();
   mode = m;
   document.body.classList.toggle("mode-read", m === "read");
+  document.body.classList.toggle("mode-corners", m === "corners");
   $("modeTitle").textContent = m;
   $("modeBtn").textContent = m === "read" ? "← Capture" : "Read position →";
-  if (m === "read") { applySavedLiveCorners(); renderRead(); } else { render(); }
+  $("cornersBtn").textContent = m === "corners" ? "← Capture" : "Label corners ⊹";
+  if (m === "read") { applySavedLiveCorners(); renderRead(); }
+  else if (m === "corners") { loadCornerInbox(); }
+  else { render(); }
   updateButtons();
 }
 
@@ -967,6 +1113,8 @@ function renderResultChip() {
   chip.textContent = state.game.result_label ? `${r} · ${state.game.result_label}` : r;
 }
 function updateButtons() {
+  $("cornersBtn").hidden = !cornerLabel.available;
+  if (mode === "corners") { $("modeBtn").hidden = true; return; }
   const camReady = !!(stream && $("video").videoWidth);
   $("modeBtn").hidden = !live.available;
   if (mode === "read") {
@@ -1032,6 +1180,7 @@ $("flipBtn").onclick = rotateView;
 $("markBtn").onclick = enterCornerMode;
 $("rotateBtn").onclick = rotateGrid;
 $("modeBtn").onclick = () => setMode(mode === "read" ? "capture" : "read");
+$("cornersBtn").onclick = () => setMode(mode === "corners" ? "capture" : "corners");
 $("readBtn").onclick = () => readPosition().catch((e) => toast(e.message));
 $("readRotateBtn").onclick = rotateRead;
 $("copyFenBtn").onclick = () => copyFen();
@@ -1060,6 +1209,7 @@ document.addEventListener("keydown", (e) => {
     else if (e.code === "Backspace" && cornerPts.length) { e.preventDefault(); cornerPts.pop(); redrawCorners(); }
     return;
   }
+  if (mode === "corners") return;  // browser-only; labelling happens in the modal
   if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); mode === "read" ? readPosition() : snap(); }
   else if (mode === "read") { if (e.code === "ArrowRight" || e.code === "ArrowLeft") rotateRead(); }
   else if (state && e.code === "ArrowLeft") goto(state.ply_index - 1);
@@ -1069,6 +1219,7 @@ document.addEventListener("keydown", (e) => {
 loadMeta();
 checkLiveAvailable().then(updateButtons);
 checkCornerAssist();
+checkCornerLabel().then(updateButtons);
 listCameras();
 overlayLoop();
 </script>

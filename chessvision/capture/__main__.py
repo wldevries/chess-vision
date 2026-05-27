@@ -72,6 +72,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "handles) with this corner-regressor checkpoint (e.g. runs/corners/best.pt)",
     )
     p.add_argument(
+        "--corners-root",
+        type=Path,
+        default=None,
+        help="enable corner-label mode over phone photos staged in <root>/inbox/, writing "
+        "a standalone corner dataset to <root>/store/ (e.g. --corners-root data/corners)",
+    )
+    p.add_argument(
         "--device",
         default=None,
         help="torch device for live inference (default: cuda if available, else cpu)",
@@ -108,12 +115,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Read-position mode ON · checkpoint {args.keypoint_ckpt}")
     if args.corner_ckpt:
         print(f"Corner-assist ON · checkpoint {args.corner_ckpt}")
+    if args.corners_root:
+        print(
+            f"Corner-label mode ON · staging {args.corners_root}/inbox -> {args.corners_root}/store"
+        )
     app = create_app(
         games,
         args.out,
         lichess_token=token,
         keypoint_ckpt=args.keypoint_ckpt,
         corner_ckpt=args.corner_ckpt,
+        corners_root=args.corners_root,
         device=args.device,
     )
     uvicorn.run(app, host=args.host, port=args.port)
