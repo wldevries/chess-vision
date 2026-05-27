@@ -1,9 +1,11 @@
 """Train the board-corner localizer on ChessReD chessred2k (Phase 3).
 
 Trains a compact heatmap/soft-argmax corner model (`chessvision.corner_regressor`)
-on the 1442/330/306 chessred2k corner split and reports mean per-corner error.
-Corners are predicted in visual TL/TR/BR/BL slots (orientation stays a manual
-toggle downstream -- see `chessvision.data.corners`).
+on the 1442/330/306 chessred2k corner split and reports mean per-point error.
+By default it trains the 81-point 9x9 lattice (better cell-assignment precision --
+see corner-precision notes); pass `--no-lattice` for the 4-corner model, whose
+corners are predicted in visual TL/TR/BR/BL slots. Orientation stays a manual
+toggle downstream either way -- see `chessvision.data.corners`.
 
 Usage:
     uv run python scripts/train_corner_regressor.py \
@@ -94,10 +96,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add(
         "--lattice",
-        action="store_true",
-        help="train the 81-point grid lattice instead of 4 corners (predicts every 9x9 "
-        "intersection; targets auto-derived from the labelled corners). Reuses the whole "
-        "stack -- loss/eval are generic over point count.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="train the 81-point grid lattice (default) instead of 4 corners (predicts every "
+        "9x9 intersection; targets auto-derived from the labelled corners). Reuses the whole "
+        "stack -- loss/eval are generic over point count. Pass --no-lattice for the 4-corner "
+        "model.",
     )
     add("--out-dir", type=Path, default=Path("runs/corners"))
     # Capture set (the user's own boards): added to train for board-appearance variety,
