@@ -56,7 +56,7 @@ NUM_LATTICE = 81
 
 @dataclass
 class CornerConfig:
-    image_size: int = 384  # square network input (board ~fills the 3072^2 ChessReD frame)
+    image_size: int = 512  # square network input (board ~fills the 3072^2 ChessReD frame)
     hflip_prob: float = 0.0  # train-time horizontal flip probability
     jitter: float = 0.0  # train-time brightness/contrast jitter magnitude (0 disables)
     # Colour augmentation -- breaks the board-colour/wood-tone shortcut that plain

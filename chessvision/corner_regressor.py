@@ -38,7 +38,7 @@ from chessvision.data.corners import CORNER_ORDER, LATTICE_CANONICAL, NUM_CORNER
 from chessvision.geometry import CANONICAL_ANCHORS
 
 DEFAULT_BACKBONE = "mobilenet_v3_small"
-DEFAULT_IMAGE_SIZE = 384
+DEFAULT_IMAGE_SIZE = 512  # 384->512 tightened cell-disp on the weak boards (rimless worst-disp 0.909->0.685)
 
 
 def _build_backbone(name: str, pretrained: bool) -> tuple[nn.Module, int]:

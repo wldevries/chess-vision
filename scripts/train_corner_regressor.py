@@ -59,7 +59,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--data-root", required=True, type=Path, help="ChessReD dir (has annotations.json)")
     add("--images-root", type=Path, default=None, help="image tree root override")
     add("--backbone", default="mobilenet_v3_small", help="mobilenet_v3_small|_large, resnet18, ...")
-    add("--image-size", type=int, default=384, help="square network input")
+    add("--image-size", type=int, default=512, help="square network input")
     add("--epochs", type=int, default=40)
     add("--batch-size", type=int, default=16)
     add("--lr", type=float, default=1e-3)
