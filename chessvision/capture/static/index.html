@@ -57,6 +57,10 @@
   .corner-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
                     padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
   .corner-toolbar .hint { flex: 1; min-width: 200px; color: var(--fg); font-size: 14px; }
+  .corner-toolbar .tag-progress { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted);
+                                  background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; }
+  .corner-toolbar .tag-progress b { color: var(--accent); font-weight: 700; }
+  .corner-toolbar .exit { margin-left: 22px; }
   .corner-canvas-area { flex: 1; position: relative; min-height: 0; }
   #cornerCanvas { position: absolute; inset: 0; width: 100%; height: 100%;
                   cursor: crosshair; touch-action: none; }
@@ -219,7 +223,9 @@
 
   <main>
     <section class="pane corners-only" id="cornersPane">
-      <h2>Corner inbox <span class="muted" id="cornerProgress"></span></h2>
+      <h2>Corner inbox <span class="muted" id="cornerProgress"></span>
+        <button id="startTagging" hidden>Start tagging ▶</button>
+      </h2>
       <div class="corner-browser" id="cornerBrowser">
         <div class="cb-empty">Drop phone photos into the inbox folder, then reload.</div>
       </div>
@@ -304,11 +310,11 @@
   <div class="corner-modal" id="cornerModal">
     <div class="corner-toolbar">
       <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
+      <span class="tag-progress" id="taggingProgress" hidden></span>
       <select id="cornerBoard" class="corners-only" title="Board for this photo (remembered)"></select>
       <button id="predictCorner" hidden>Predict</button>
-      <button id="undoCorner">Undo</button>
-      <button id="cancelCorner">Cancel</button>
       <button id="saveCorner" class="primary" disabled>Save</button>
+      <button id="cancelCorner" class="exit">Close</button>
     </div>
     <div class="corner-canvas-area">
       <canvas id="cornerCanvas"></canvas>
@@ -429,6 +435,7 @@ function enterCornerMode() {
   frozen.width = v.videoWidth; frozen.height = v.videoHeight;
   frozen.getContext("2d").drawImage(v, 0, 0);
   cornerPts = existingCornerPts(); cornerMode = true; dragging = null;
+  $("taggingProgress").hidden = true;  // capture/read corner-marking: no inbox progress
   $("cornerModal").classList.add("show");
   requestAnimationFrame(redrawCorners);
 }
@@ -729,8 +736,28 @@ async function loadCornerInbox() {
   renderCornerBrowser();
 }
 function updateCornerProgress() {
-  const ps = cornerLabel.photos, n = ps.filter((p) => p.labeled).length;
+  const ps = cornerLabel.photos, n = ps.filter((p) => p.labeled).length, remaining = ps.length - n;
   $("cornerProgress").textContent = ps.length ? `· ${n}/${ps.length} labelled` : "";
+  const btn = $("startTagging");
+  btn.hidden = remaining <= 0;  // nothing left -> hide (re-open from a thumbnail for QA)
+  btn.textContent = n ? `Resume tagging ▶ (${remaining} left)` : "Start tagging ▶";
+}
+// Live progress chip in the marking modal: which photo of the inbox you're on and how
+// many are labelled overall. Corner-label mode only (the modal is shared with capture/read).
+function updateTaggingProgress() {
+  const el = $("taggingProgress");
+  if (mode !== "corners" || !cornerLabel.src) { el.hidden = true; return; }
+  const ps = cornerLabel.photos, total = ps.length;
+  const pos = ps.findIndex((p) => p.src === cornerLabel.src) + 1;
+  const done = ps.filter((p) => p.labeled).length;
+  el.hidden = false;
+  el.innerHTML = `photo <b>${pos}</b>/${total} · ${done}/${total} labelled`;
+}
+// Jump straight into the first unlabelled photo; save auto-advances through the rest.
+function startTagging() {
+  const next = cornerLabel.photos.find((p) => !p.labeled);
+  if (next) enterCornerLabelMode(next);
+  else toast("All photos labelled ✓");
 }
 function cornerThumb(p) {
   const d = document.createElement("div");
@@ -773,8 +800,13 @@ function enterCornerLabelMode(photo) {
     cornerLabel.src = photo.src;
     cornerPts = (photo.corners && photo.corners.length === 4) ? photo.corners.map((p) => p.slice()) : [];
     cornerMode = true; dragging = null;
+    updateTaggingProgress();
     $("cornerModal").classList.add("show");
     requestAnimationFrame(redrawCorners);
+    // Start from a predicted board: auto-prefill the handles so labelling begins by
+    // nudging a prediction, not placing 4 corners from scratch. Skip when the photo is
+    // already labelled (keep its saved corners) or predict is off.
+    if (cornerLabel.predict && cornerPts.length !== 4) predictCorners();
   };
   img.onerror = () => toast("Could not load photo");
   img.src = `/api/corners-label/image?src=${encodeURIComponent(photo.src)}`;
@@ -1213,8 +1245,8 @@ $("cornerCanvas").addEventListener("pointermove", cornerPointerMove);
 $("cornerCanvas").addEventListener("pointerup", cornerPointerUp);
 $("cornerCanvas").addEventListener("pointercancel", cornerPointerUp);
 $("cornerModal").addEventListener("contextmenu", (e) => e.preventDefault());
+$("startTagging").onclick = startTagging;
 $("predictCorner").onclick = () => predictCorners().catch((e) => toast(e.message));
-$("undoCorner").onclick = () => { if (cornerPts.length) { cornerPts.pop(); redrawCorners(); } };
 $("cancelCorner").onclick = cancelCornerMode;
 $("saveCorner").onclick = () => saveCorners().catch((e) => toast(e.message));
 window.addEventListener("resize", () => { if (cornerMode && frozen) redrawCorners(); });
@@ -1228,7 +1260,6 @@ document.addEventListener("keydown", (e) => {
   if (cornerMode) {
     if (e.code === "Escape") cancelCornerMode();
     else if (e.code === "Enter" && cornerPts.length === 4) { e.preventDefault(); saveCorners().catch((err) => toast(err.message)); }
-    else if (e.code === "Backspace" && cornerPts.length) { e.preventDefault(); cornerPts.pop(); redrawCorners(); }
     return;
   }
   if (mode === "corners") return;  // browser-only; labelling happens in the modal
