@@ -70,6 +70,15 @@ class CornerLabelIn(BaseModel):
     surface: str | None = None
 
 
+class CaptureCornersIn(BaseModel):
+    """Corrected corners for one capture frame (corner-validation mode). `corners` maps
+    the snake_case corner key (top_left/...) to an [x, y] point in image pixels; pushed
+    to Label Studio by PATCHing the task's annotation (corners only, pieces untouched)."""
+
+    task_id: int
+    corners: list[tuple[float, float]]  # 4 [x, y] points in image px (any order)
+
+
 class SessionMetaIn(BaseModel):
     """Editable per-session domain tags (metadata editor). `set` is a Python builtin,
     so it rides in under the `piece_set` field with a JSON alias. Omitted fields are
@@ -343,6 +352,12 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
         return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    @app.get("/validate", response_class=HTMLResponse)
+    def validate_page() -> str:
+        """Read-only browser for capture corners: page through every frame with the
+        current (labelled) grid overlaid, plus the model's grid for comparison."""
+        return (STATIC_DIR / "validate.html").read_text(encoding="utf-8")
 
     @app.get("/api/games")
     def list_games() -> list[dict]:
@@ -761,6 +776,138 @@ def create_app(
         except Exception as exc:  # save / encode failure
             raise HTTPException(500, f"save failed: {exc}") from exc
         return {"id": label.id, "src": label.src, "board": label.board, "labeled": True}
+
+    # ---- capture corner-validation mode ----------------------------------- #
+    # Review/fix the corners on captured frames and push the correction into Label
+    # Studio (PATCH the task's annotation; pieces untouched). Frames + original corners
+    # + LS task ids come from the local label-studio.json; the model corners come from
+    # the (lattice) corner predictor; the image is served from the /captures mount.
+    _cc: dict = {"samples": None, "ls": None, "export_storage_id": None}
+
+    def _capture_samples() -> dict:
+        if _cc["samples"] is None:
+            from chessvision.data.captures import CaptureDataset
+
+            export = out_root / "label-studio.json"
+            if not export.exists():
+                raise HTTPException(503, f"no capture export at {export} (run sync annotations)")
+            ds = CaptureDataset.load(export, out_root)
+            _cc["samples"] = {s.task_id: s for s in ds.samples}
+        return _cc["samples"]
+
+    def _ls_client():
+        if _cc["ls"] is None:
+            from chessvision.data.labelstudio_api import LabelStudioClient
+
+            try:
+                _cc["ls"] = LabelStudioClient()
+            except Exception as exc:  # missing env / unreachable
+                raise HTTPException(503, f"Label Studio not configured: {exc}") from exc
+        return _cc["ls"]
+
+    def _image_url(sample) -> str:
+        rel = Path(sample.image_path).resolve().relative_to(out_root.resolve())
+        return "/captures/" + rel.as_posix()
+
+    @app.get("/api/capture-corners/available")
+    def cc_available() -> dict:
+        """Mode is usable when Label Studio is configured (env) and a corner model is loaded."""
+        import os
+
+        from dotenv import load_dotenv
+
+        load_dotenv()
+        ls_ok = bool(os.environ.get("LABEL_STUDIO_URL") and os.environ.get("LABEL_STUDIO_TOKEN"))
+        return {"available": ls_ok, "predict": corner_predictor is not None}
+
+    @app.get("/api/capture-corners/list")
+    def cc_list() -> list[dict]:
+        """Every capture frame with a Label Studio task id, for the review queue."""
+        samples = _capture_samples()
+        return [
+            {
+                "task_id": s.task_id,
+                "session": s.session,
+                "name": Path(s.image_path).name,
+                "has_all_corners": s.has_all_corners,
+                "image_url": _image_url(s),
+            }
+            for s in sorted(samples.values(), key=lambda s: (s.session, str(s.image_path)))
+        ]
+
+    @app.get("/api/capture-corners/frame/{task_id}")
+    def cc_frame(task_id: int) -> dict:
+        """Original (labelled) corners + model-predicted corners + dims, for one frame."""
+        sample = _capture_samples().get(task_id)
+        if sample is None:
+            raise HTTPException(404, f"no capture frame for task {task_id}")
+        original = {k: [float(x), float(y)] for k, (x, y) in sample.corners.items()}
+        model = None
+        if corner_predictor is not None:
+            try:
+                model = corner_predictor.predict(sample.load_image())
+            except Exception as exc:
+                raise HTTPException(500, f"corner prediction failed: {exc}") from exc
+        return {
+            "task_id": task_id,
+            "session": sample.session,
+            "width": sample.width,
+            "height": sample.height,
+            "image_url": _image_url(sample),
+            "original": original,
+            "model": model,
+        }
+
+    @app.post("/api/capture-corners/save")
+    def cc_save(body: CaptureCornersIn) -> dict:
+        """PATCH the corrected corners onto the frame's Label Studio annotation (pieces kept)."""
+        if len(body.corners) != 4:
+            raise HTTPException(400, "corners must be exactly four [x, y] points")
+        client = _ls_client()
+        task = client.get_task(body.task_id)
+        anns = [a for a in (task.get("annotations") or []) if not a.get("was_cancelled")]
+        if not anns:
+            raise HTTPException(404, f"task {body.task_id} has no annotation to update")
+        ann = max(anns, key=lambda a: a.get("updated_at") or "")
+        result = ann["result"]
+        ow = next((r.get("original_width") for r in result if r.get("original_width")), None)
+        oh = next((r.get("original_height") for r in result if r.get("original_height")), None)
+        if not ow or not oh:
+            raise HTTPException(500, "annotation result missing original_width/height")
+        # Fix positions, preserve labels: assign each corrected point to the existing corner
+        # keypoint it's nearest to (the capture labels use their own corner-naming convention;
+        # training re-canonicalizes by position anyway, so we never relabel -- just move points).
+        corner_rs = [r for r in result if r.get("from_name") == "corners"]
+        if len(corner_rs) != 4:
+            raise HTTPException(500, f"annotation has {len(corner_rs)} corner keypoints, expected 4")
+        pts = [(float(x), float(y)) for x, y in body.corners]
+        used: set[int] = set()
+        for r in corner_rs:
+            cx = r["value"]["x"] / 100.0 * ow
+            cy = r["value"]["y"] / 100.0 * oh
+            i = min(
+                (j for j in range(4) if j not in used),
+                key=lambda j: (pts[j][0] - cx) ** 2 + (pts[j][1] - cy) ** 2,
+            )
+            used.add(i)
+            r["value"]["x"] = pts[i][0] / ow * 100.0
+            r["value"]["y"] = pts[i][1] / oh * 100.0
+        client.update_annotation(ann["id"], result)
+        return {"task_id": body.task_id, "annotation_id": ann["id"], "updated": 4}
+
+    @app.post("/api/capture-corners/sync")
+    def cc_sync() -> dict:
+        """Force the Label Studio target storage to export annotations to the bucket (not
+        automatic). Run after a batch of saves; then `sync_captures.py annotations` locally."""
+        client = _ls_client()
+        if _cc["export_storage_id"] is None:
+            pid = client.resolve_project_id()
+            stores = client.export_storages(pid)
+            if not stores:
+                raise HTTPException(503, "no export storage on the project")
+            _cc["export_storage_id"] = stores[0]["id"]
+        res = client.sync_export_storage(_cc["export_storage_id"])
+        return {"status": res.get("status"), "last_sync_count": res.get("last_sync_count")}
 
     @app.exception_handler(HTTPException)
     async def _http_error(_request, exc: HTTPException) -> JSONResponse:
