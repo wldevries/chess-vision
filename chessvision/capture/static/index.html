@@ -30,6 +30,13 @@
   button:active { transform: translateY(1px); }
   button.primary { background: var(--accent); border-color: var(--accent); font-weight: 700; }
   button:disabled { opacity: .4; cursor: default; }
+  /* Segmented mode switcher: 3 view-modes (Capture/Read/Corners) + Edit sessions,
+     which opens a modal over the active mode and so never carries .active itself. */
+  .modeswitch { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .modeswitch button { border: 0; border-left: 1px solid var(--line); border-radius: 0; }
+  .modeswitch button:first-child { border-left: 0; }
+  .modetab.active { background: var(--accent); font-weight: 700; }
+  .modetab-action { border-left: 2px solid var(--bg); color: var(--muted); }
   .muted { color: var(--muted); font-size: 14px; }
   .progress { color: var(--muted); font-variant-numeric: tabular-nums; }
 
@@ -185,9 +192,13 @@
 </head>
 <body>
   <header>
-    <span class="title">♟ <span id="modeTitle">capture</span></span>
-    <button id="modeBtn" title="Switch between labelling a known game and reading an unknown position">Read position →</button>
-    <button id="cornersBtn" hidden title="Label board corners on staged phone photos">Label corners ⊹</button>
+    <span class="title">♟</span>
+    <span class="modeswitch" role="tablist">
+      <button class="modetab active" data-mode="capture" title="Label a known game">Capture</button>
+      <button class="modetab" data-mode="read" title="Read an unknown position">Read</button>
+      <button class="modetab" data-mode="corners" title="Label board corners on staged phone photos">Corners</button>
+      <button class="modetab modetab-action" id="metaTab" title="Tag past sessions with camera / set / board / surface">Edit sessions</button>
+    </span>
     <span class="capture-only">
       <select id="setSelect" title="Piece set used (tagged onto the session)"></select>
       <select id="boardSelect" title="Board used (tagged onto the session)"></select>
@@ -200,7 +211,6 @@
       </select>
       <button id="puzzleBtn" title="Fetch a fresh Lichess puzzle">Next puzzle</button>
       <button id="finishBtn" title="Upload now — only needed if you stop before the position is fully captured. A completed game/puzzle uploads automatically.">Finish &amp; upload</button>
-      <button id="metaBtn" title="Tag past sessions with camera / set / board / surface">Edit sessions</button>
     </span>
     <span class="spacer"></span>
     <span class="result-chip" id="resultChip"></span>
@@ -697,7 +707,7 @@ async function checkCornerLabel() {
     const r = await fetch("/api/corners-label/available").then(j);
     cornerLabel.available = r.available; cornerLabel.predict = r.predict;
   } catch { cornerLabel.available = false; }
-  $("cornersBtn").hidden = !cornerLabel.available;
+  refreshModeTabs();
   if (cornerLabel.available) loadCornerBoards();
 }
 async function loadCornerBoards() {
@@ -790,7 +800,7 @@ async function saveCornerLabel() {
 async function checkLiveAvailable() {
   try { live.available = (await fetch("/api/live/available").then(j)).available; }
   catch { live.available = false; }
-  $("modeBtn").hidden = !live.available;
+  refreshModeTabs();
 }
 function applySavedLiveCorners() {
   const raw = localStorage.getItem(liveCornerKey());
@@ -842,13 +852,27 @@ function setMode(m) {
   mode = m;
   document.body.classList.toggle("mode-read", m === "read");
   document.body.classList.toggle("mode-corners", m === "corners");
-  $("modeTitle").textContent = m;
-  $("modeBtn").textContent = m === "read" ? "← Capture" : "Read position →";
-  $("cornersBtn").textContent = m === "corners" ? "← Capture" : "Label corners ⊹";
+  setActiveTab(m);
   if (m === "read") { applySavedLiveCorners(); renderRead(); }
   else if (m === "corners") { loadCornerInbox(); }
   else { render(); }
   updateButtons();
+}
+
+// The three view-mode tabs reflect the current mode; disabled when their launch flag
+// is absent (Read needs --keypoint-ckpt, Corners needs --corners-root) with a hint.
+function setActiveTab(m) {
+  document.querySelectorAll(".modetab[data-mode]").forEach((b) => b.classList.toggle("active", b.dataset.mode === m));
+}
+function refreshModeTabs() {
+  const read = document.querySelector('.modetab[data-mode="read"]');
+  const corners = document.querySelector('.modetab[data-mode="corners"]');
+  read.disabled = !live.available;
+  read.title = live.available ? "Read an unknown position" : "Read-position mode — launch with --keypoint-ckpt";
+  corners.disabled = !cornerLabel.available;
+  corners.title = cornerLabel.available
+    ? "Label board corners on staged phone photos"
+    : "Corner-label mode — launch with --corners-root";
 }
 
 /* ---------- session flow ---------- */
@@ -1113,10 +1137,9 @@ function renderResultChip() {
   chip.textContent = state.game.result_label ? `${r} · ${state.game.result_label}` : r;
 }
 function updateButtons() {
-  $("cornersBtn").hidden = !cornerLabel.available;
-  if (mode === "corners") { $("modeBtn").hidden = true; return; }
+  refreshModeTabs();
+  if (mode === "corners") return;
   const camReady = !!(stream && $("video").videoWidth);
-  $("modeBtn").hidden = !live.available;
   if (mode === "read") {
     $("snapBtn").hidden = true; $("readBtn").hidden = false;
     $("readBtn").disabled = !camReady || cornerMode || !live.corners;
@@ -1169,7 +1192,7 @@ function toast(msg) {
 /* ---------- wiring ---------- */
 $("selectGameBtn").onclick = openGamePicker;
 $("gameModal").onclick = (e) => { if (e.target.id === "gameModal") closeGamePicker(); };
-$("metaBtn").onclick = () => openMetaEditor();
+$("metaTab").onclick = () => openMetaEditor();
 $("metaClose").onclick = closeMetaEditor;
 $("puzzleBtn").onclick = () => nextPuzzle().catch((e) => toast(e.message));
 $("finishBtn").onclick = () => finishSession().catch((e) => toast(e.message));
@@ -1179,8 +1202,7 @@ $("nextBtn").onclick = () => goto(state.ply_index + 1);
 $("flipBtn").onclick = rotateView;
 $("markBtn").onclick = enterCornerMode;
 $("rotateBtn").onclick = rotateGrid;
-$("modeBtn").onclick = () => setMode(mode === "read" ? "capture" : "read");
-$("cornersBtn").onclick = () => setMode(mode === "corners" ? "capture" : "corners");
+document.querySelectorAll(".modetab[data-mode]").forEach((b) => { b.onclick = () => setMode(b.dataset.mode); });
 $("readBtn").onclick = () => readPosition().catch((e) => toast(e.message));
 $("readRotateBtn").onclick = rotateRead;
 $("copyFenBtn").onclick = () => copyFen();

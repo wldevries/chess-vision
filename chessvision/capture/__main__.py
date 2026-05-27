@@ -74,9 +74,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--corners-root",
         type=Path,
-        default=None,
-        help="enable corner-label mode over phone photos staged in <root>/inbox/, writing "
-        "a standalone corner dataset to <root>/store/ (e.g. --corners-root data/corners)",
+        default=Path("data/corners"),
+        help="corner-label mode root: phone photos staged in <root>/inbox/ are labelled in "
+        "the app and written as a standalone corner dataset to <root>/store/. On by default; "
+        "pass --no-corners-root to disable.",
+    )
+    p.add_argument(
+        "--no-corners-root",
+        dest="corners_root",
+        action="store_const",
+        const=None,
+        help="disable corner-label mode (hide the Corners tab)",
     )
     p.add_argument(
         "--device",
