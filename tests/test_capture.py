@@ -309,7 +309,7 @@ def _jpeg_bytes() -> bytes:
 
 
 def test_corner_assist_off_by_default(client: TestClient) -> None:
-    assert client.get("/api/corners/available").json() == {"available": False}
+    assert client.get("/api/corners/available").json() == {"available": False, "heatmap": False}
     resp = client.post(
         "/api/corners/predict", files={"image": ("f.jpg", _jpeg_bytes(), "image/jpeg")}
     )
@@ -320,7 +320,7 @@ def test_corner_assist_predicts_when_injected(tmp_path: Path) -> None:
     games = load_pgn_file(SAMPLE_PGN)
     client = TestClient(create_app(games, tmp_path, corner_predictor=_FakeCornerPredictor()))
 
-    assert client.get("/api/corners/available").json() == {"available": True}
+    assert client.get("/api/corners/available").json() == {"available": True, "heatmap": False}
 
     resp = client.post(
         "/api/corners/predict", files={"image": ("f.jpg", _jpeg_bytes(), "image/jpeg")}
