@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>chessvision — label positions</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1f232b; --line: #2c313b; --fg: #e7e9ee;
+    --muted: #9aa3b2; --accent: #4f8cff; --good: #36c46b; --bad: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+  }
+  header {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header .title { font-weight: 700; letter-spacing: .3px; }
+  header .spacer { flex: 1; }
+  a.backlink { color: var(--muted); text-decoration: none; padding: 8px 10px; border-radius: 8px; }
+  a.backlink:hover { background: #262b34; color: var(--fg); }
+  select, button, input {
+    font: inherit; color: var(--fg); background: #262b34; border: 1px solid var(--line);
+    border-radius: 10px; padding: 9px 12px;
+  }
+  button { cursor: pointer; }
+  button:active { transform: translateY(1px); }
+  button.primary { background: var(--accent); border-color: var(--accent); font-weight: 700; }
+  button.good { background: var(--good); border-color: var(--good); color: #06210f; font-weight: 700; }
+  button:disabled { opacity: .4; cursor: default; }
+  select { max-width: 30vw; }
+  input.fen { font: 13px/1.3 ui-monospace, monospace; min-width: 220px; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .progress { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  main { flex: 1; display: grid; grid-template-columns: 2fr 1fr; gap: 14px; padding: 14px; min-height: 0; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .pane { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+          padding: 12px; display: flex; flex-direction: column; min-height: 0; }
+  .pane h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+
+  .stage { position: relative; flex: 1; min-height: 0; background: #000; border-radius: 10px; overflow: hidden; }
+  #posCanvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+  #posCanvas.pan { cursor: grab; }
+  #posCanvas.panning { cursor: grabbing; }
+  .stage .hint { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted);
+                 text-align: center; padding: 24px; }
+  .zoomctl { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 6px; align-items: center;
+             background: #000a; border: 1px solid var(--line); border-radius: 10px; padding: 5px 7px; }
+  .zoomctl button { padding: 5px 9px; border-radius: 7px; font-size: 14px; }
+  .zoomctl .z { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; min-width: 42px; text-align: center; }
+
+  .ref-board { width: 100%; display: grid; place-items: center; }
+  .ref-board svg { width: 100%; height: auto; max-height: 42vh; }
+  .legend { color: var(--muted); font-size: 14px; margin-top: 10px; }
+  .steps { font-size: 14px; color: var(--muted); margin-top: 12px; line-height: 1.7; }
+  .steps b { color: var(--fg); }
+
+  /* Inbox picker overlay (choose a photo to position) */
+  .picker { position: fixed; inset: 0; background: var(--bg); display: none; z-index: 35; flex-direction: column; }
+  .picker.show { display: flex; }
+  .picker-head { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .picker-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+  .cb-group-head { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .06em;
+                   margin: 14px 4px 8px; position: sticky; top: 0; background: var(--bg); padding: 4px 0; }
+  .cb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .cb-thumb { position: relative; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+              background: #000; cursor: pointer; aspect-ratio: 4/3; }
+  .cb-thumb:hover { border-color: var(--accent); }
+  .cb-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cb-thumb.done { border-color: var(--good); }
+  .cb-thumb.nocorners { opacity: .55; }
+  .cb-badge { position: absolute; top: 6px; right: 6px; font-size: 12px; font-weight: 700;
+              padding: 2px 7px; border-radius: 999px; background: #000a; color: var(--fg); }
+  .cb-thumb.done .cb-badge { background: var(--good); color: #06210f; }
+  .cb-tag { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; padding: 2px 6px;
+            background: rgba(0,0,0,.6); color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* shared corner modal */
+  .corner-modal { position: fixed; inset: 0; background: #000; display: none; z-index: 40; flex-direction: column; }
+  .corner-modal.show { display: flex; }
+  .corner-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+                    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .corner-toolbar .hint { flex: 1; min-width: 200px; color: var(--fg); font-size: 14px; }
+  .corner-toolbar .exit { margin-left: 22px; }
+  .corner-canvas-area { flex: 1; position: relative; min-height: 0; }
+  #cornerCanvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
+  .toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%);
+           background: #000a; border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px;
+           opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 50; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">♟ Label positions</span>
+    <a class="backlink" href="/" title="Back to menu">☰ menu</a>
+    <button id="pickBtn">Choose photo ▾</button>
+    <button id="markBtn" disabled title="Mark or adjust the board corners">Corners</button>
+    <select id="fenSelect" title="Saved positions"><option value="">— position —</option></select>
+    <input id="fenInput" class="fen" placeholder="paste FEN / placement field" />
+    <button id="addLibBtn" title="Save this FEN to the library">＋ save</button>
+    <button id="orientBtn" disabled title="Cycle which physical corner is a8 until the pieces match the photo">a8 ⟳ · R0</button>
+    <button id="projectBtn" class="primary" disabled>Project</button>
+    <span class="spacer"></span>
+    <span class="progress" id="progress">—</span>
+    <button id="saveBtn" class="good" disabled>Save ✓</button>
+  </header>
+
+  <main>
+    <section class="pane">
+      <h2>Photo</h2>
+      <div class="stage">
+        <canvas id="posCanvas"></canvas>
+        <div class="zoomctl" id="zoomCtl" hidden>
+          <button id="zoomOut" title="Zoom out">−</button>
+          <span class="z" id="zoomReadout">1.0×</span>
+          <button id="zoomIn" title="Zoom in">＋</button>
+          <button id="zoomFit" title="Fit to view">Fit</button>
+          <button id="zoom2x" title="2× zoom">2×</button>
+          <button id="zoom4x" title="4× zoom">4×</button>
+        </div>
+        <div class="hint" id="stageHint">Choose a corner-labelled photo to begin.</div>
+      </div>
+    </section>
+
+    <section class="pane">
+      <h2>Target position</h2>
+      <div class="ref-board" id="refBoard"><span class="muted">Pick or paste a FEN, then Project.</span></div>
+      <div class="legend" id="legend"></div>
+      <div class="steps">
+        <b>1.</b> Choose a photo (corner-labelled ones are ready; others need <b>Corners</b> first).<br>
+        <b>2.</b> Pick the position's FEN (reused across same-setup photos).<br>
+        <b>3.</b> Tap <b>a8 ⟳</b> until the projected pieces sit on the right squares.<br>
+        <b>4.</b> Drag each piece dot onto the true base, then <b>Save</b>.
+      </div>
+    </section>
+  </main>
+
+  <!-- inbox picker -->
+  <div class="picker" id="picker">
+    <div class="picker-head">
+      <span class="title">Choose a photo</span>
+      <button id="reloadBtn" title="Re-scan the inbox">↻ reload</button>
+      <span class="muted" id="pickProgress"></span>
+      <span class="spacer" style="flex:1"></span>
+      <button id="pickClose" class="exit">Close</button>
+    </div>
+    <div class="picker-body" id="pickBody"><div class="muted">Loading…</div></div>
+  </div>
+
+  <!-- shared corner modal (cv.js drives it) -->
+  <div class="corner-modal" id="cornerModal">
+    <div class="corner-toolbar">
+      <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
+      <button id="predictCorner" hidden>Predict</button>
+      <button id="saveCorner" class="primary" disabled>Save</button>
+      <button id="cancelCorner" class="exit">Close</button>
+    </div>
+    <div class="corner-canvas-area">
+      <canvas id="cornerCanvas"></canvas>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <canvas id="canvas" hidden></canvas>
+
+<script src="/static/cv.js"></script>
+<script>
+// Position-label mode: project a known FEN onto a corner photo, nudge each piece's base.
+// Camera-free; works on stored corner-capture photos. Corner-marking modal (CM) + grid
+// math from cv.js; this file is the photo stage, projection, and piece-handle dragging.
+let photos = [];
+let cur = null;        // current photo (InboxPhoto dict)
+let frozen = null;     // <canvas> with the loaded photo at native resolution
+let corners = null;    // [TL, TR, BR, BL] in native px, or null
+let pieces = [];       // [{label, fen, square, x, y}] in native px (x,y get nudged)
+let orientIdx = 0;     // index into ORIENTATIONS
+let dragging = null;   // index of the piece dot being dragged
+let grabOff = [0, 0];  // (piece - cursor) at grab, so the dot doesn't jump to the cursor
+let library = {};
+// Pan/zoom view: maps native photo px -> canvas px as `canvas = native*scale + off`
+// (same shape as containRect, so cv.js toDisplay/toNative work on it directly). null ->
+// reset to fit on next draw. `panning`/`spaceHeld` gate the pan gesture vs piece drag.
+let view = null;
+let panning = null;
+let spaceHeld = false;
+
+const FEN_LETTER = { WhitePawn:"P", WhiteRook:"R", WhiteKnight:"N", WhiteBishop:"B", WhiteQueen:"Q", WhiteKing:"K",
+                     BlackPawn:"p", BlackRook:"r", BlackKnight:"n", BlackBishop:"b", BlackQueen:"q", BlackKing:"k" };
+
+/* ---------- inbox picker ---------- */
+async function loadInbox() {
+  const body = $("pickBody");
+  body.innerHTML = '<div class="muted">Loading…</div>';
+  try { photos = await fetch("/api/positions/inbox").then(j); }
+  catch (e) { body.innerHTML = `<div class="muted">Load failed: ${e.message}</div>`; return; }
+  const done = photos.filter((p) => p.positioned).length;
+  const withC = photos.filter((p) => p.labeled).length;
+  $("pickProgress").textContent = `${done} positioned · ${withC}/${photos.length} have corners`;
+  if (!photos.length) { body.innerHTML = '<div class="muted">No photos in the inbox. Drop images into the corners inbox and reload.</div>'; return; }
+  const order = [], byKey = {};
+  photos.forEach((p) => { const k = p.group || "(inbox root)"; if (!byKey[k]) { byKey[k] = []; order.push(k); } byKey[k].push(p); });
+  body.innerHTML = "";
+  order.forEach((k) => {
+    const head = document.createElement("div"); head.className = "cb-group-head"; head.textContent = k; body.appendChild(head);
+    const grid = document.createElement("div"); grid.className = "cb-grid";
+    byKey[k].forEach((p) => grid.appendChild(thumb(p)));
+    body.appendChild(grid);
+  });
+}
+function thumb(p) {
+  const d = document.createElement("div");
+  d.className = "cb-thumb" + (p.positioned ? " done" : "") + (p.labeled ? "" : " nocorners");
+  const img = document.createElement("img"); img.loading = "lazy"; img.alt = "";
+  img.src = `/api/positions/image?w=240&src=${encodeURIComponent(p.src)}`;
+  const badge = document.createElement("span"); badge.className = "cb-badge";
+  badge.textContent = p.positioned ? "✓" : (p.labeled ? "▦" : "·");
+  badge.title = p.positioned ? "pieces placed" : (p.labeled ? "has corners" : "no corners yet");
+  const tag = document.createElement("span"); tag.className = "cb-tag";
+  tag.textContent = p.src.split("/").pop() + (p.board ? ` · ${p.board}` : "");
+  d.append(img, badge, tag);
+  d.onclick = () => { openPhoto(p); $("picker").classList.remove("show"); };
+  return d;
+}
+
+/* ---------- load a photo into the stage ---------- */
+function openPhoto(p) {
+  const img = new Image();
+  img.onload = () => {
+    frozen = document.createElement("canvas");
+    frozen.width = img.naturalWidth; frozen.height = img.naturalHeight;
+    frozen.getContext("2d").drawImage(img, 0, 0);
+    cur = p;
+    corners = (p.corners && p.corners.length === 4) ? p.corners.map((q) => q.slice()) : null;
+    // Re-open an already-positioned photo with its FEN, orientation, and nudged pieces.
+    pieces = (p.pieces || []).map((q) => ({ label: q.label, fen: FEN_LETTER[q.label] || "?", x: q.x, y: q.y }));
+    orientIdx = Math.max(0, ORIENTATIONS.indexOf(p.orientation || "R0"));
+    if (p.fen) $("fenInput").value = p.fen;
+    $("stageHint").style.display = "none";
+    $("zoomCtl").hidden = false;
+    view = null;  // reset to fit for the new photo
+    refreshControls();
+    if (pieces.length) renderRef(null);
+    redraw();
+  };
+  img.onerror = () => toast("Could not load photo");
+  img.src = `/api/positions/image?src=${encodeURIComponent(p.src)}`;
+}
+
+/* ---------- corner marking (shared modal) ---------- */
+function markCorners() {
+  if (!frozen) return toast("Choose a photo first");
+  CM.open(frozen, {
+    initialPts: corners || [],
+    autoPredict: !corners,
+    onSave: async (ordered) => {
+      corners = [ordered.tl, ordered.tr, ordered.br, ordered.bl];
+      CM.close();
+      refreshControls();
+      redraw();
+      if (currentFen()) project().catch((e) => toast(e.message));  // re-project onto new corners
+    },
+  });
+}
+
+/* ---------- projection ---------- */
+function currentFen() { return $("fenInput").value.trim(); }
+async function project() {
+  if (!frozen) return toast("Choose a photo first");
+  if (!corners) return toast("Mark the board corners first");
+  const fen = currentFen();
+  if (!fen) return toast("Pick or paste a FEN first");
+  const r = await postJson("/api/positions/project", { corners, fen, orientation: ORIENTATIONS[orientIdx] });
+  pieces = r.pieces.map((q) => ({ label: q.label, fen: q.fen, square: q.square, x: q.x, y: q.y }));
+  renderRef(r.board_svg);
+  refreshControls();
+  redraw();
+  toast(`Projected ${pieces.length} pieces · ${ORIENTATIONS[orientIdx]} — rotate if they sit wrong, then nudge`);
+}
+function rotate() {
+  orientIdx = (orientIdx + 1) % 4;
+  refreshControls();
+  if (currentFen() && corners) project().catch((e) => toast(e.message));  // re-project at new orientation
+}
+
+/* ---------- reference board + legend ---------- */
+function renderRef(svg) {
+  if (svg) $("refBoard").innerHTML = svg;
+  $("legend").textContent = pieces.length
+    ? `${pieces.length} pieces · drag each dot onto where the piece meets the board.`
+    : "";
+}
+
+/* ---------- pan / zoom view ---------- */
+// The "fit" view (z=1) centres the whole photo, letterboxed; zoom multiplies its scale.
+function fitView() {
+  const c = $("posCanvas");
+  return containRect(frozen.width, frozen.height, c.clientWidth, c.clientHeight);
+}
+function stageRect() { if (!view) view = fitView(); return view; }
+// Keep the canvas inside the image when zoomed in, and centre it when it fits.
+function clampView() {
+  const c = $("posCanvas"), w = c.clientWidth, h = c.clientHeight;
+  const iw = frozen.width * view.scale, ih = frozen.height * view.scale;
+  view.offx = iw <= w ? (w - iw) / 2 : Math.min(0, Math.max(w - iw, view.offx));
+  view.offy = ih <= h ? (h - ih) / 2 : Math.min(0, Math.max(h - ih, view.offy));
+}
+function zoomReadout() {
+  $("zoomReadout").textContent = view ? `${(view.scale / fitView().scale).toFixed(1)}×` : "1.0×";
+}
+// Zoom about a canvas point (cx, cy), keeping the native px under it fixed. `mult` is
+// absolute (× fit) when `absolute`, else a relative factor on the current scale.
+function applyZoom(value, cx, cy, absolute = false) {
+  if (!frozen) return;
+  if (!view) view = fitView();
+  const fit = fitView().scale;
+  const target = absolute ? fit * value : view.scale * value;
+  const s = Math.max(fit, Math.min(fit * 8, target));  // never below fit, cap at 8× fit
+  const nx = (cx - view.offx) / view.scale, ny = (cy - view.offy) / view.scale;
+  view = { scale: s, offx: cx - nx * s, offy: cy - ny * s };
+  clampView(); redraw();
+}
+function zoomCenter(value, absolute = false) {
+  const c = $("posCanvas");
+  applyZoom(value, c.clientWidth / 2, c.clientHeight / 2, absolute);
+}
+function onWheel(ev) {
+  if (!frozen) return;
+  ev.preventDefault();
+  if (!view) view = fitView();
+  if (ev.ctrlKey || ev.metaKey) {  // Ctrl/Cmd + scroll -> zoom about the cursor (like Label Studio)
+    const rect = $("posCanvas").getBoundingClientRect();
+    applyZoom(Math.exp(-ev.deltaY * 0.0015), ev.clientX - rect.left, ev.clientY - rect.top);
+  } else {  // plain scroll -> pan
+    view = { scale: view.scale, offx: view.offx - ev.deltaX, offy: view.offy - ev.deltaY };
+    clampView(); redraw();
+  }
+}
+
+/* ---------- stage drawing (photo + grid + piece dots) ---------- */
+function redraw() {
+  const c = $("posCanvas");
+  if (!frozen) { c.width = c.width; return; }
+  c.width = c.clientWidth; c.height = c.clientHeight;
+  if (!view) view = fitView();
+  const ctx = c.getContext("2d");
+  const r = view;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(frozen, r.offx, r.offy, frozen.width * r.scale, frozen.height * r.scale);
+  if (corners) drawBoardGrid(ctx, corners, r);
+  pieces.forEach((p, i) => drawPiece(ctx, p, r, i === dragging));
+  zoomReadout();
+}
+// Perspective 8x8 grid from the 4 corners (same Heckbert math as the corner modal).
+function drawBoardGrid(ctx, c4, r) {
+  const o = orderCorners(c4);
+  const H = squareToQuad(o.tl, o.tr, o.br, o.bl);
+  const seg = (p, q) => {
+    const A = toDisplay(p[0], p[1], r), B = toDisplay(q[0], q[1], r);
+    ctx.beginPath(); ctx.moveTo(A[0], A[1]); ctx.lineTo(B[0], B[1]); ctx.stroke();
+  };
+  for (let k = 0; k <= 8; k++) {
+    const t = k / 8;
+    ctx.lineWidth = (k % 8 === 0) ? 2.5 : 1.2;
+    ctx.strokeStyle = (k % 8 === 0) ? "rgba(79,140,255,0.95)" : "rgba(79,140,255,0.45)";
+    seg(projectH(H, t, 0), projectH(H, t, 1));
+    seg(projectH(H, 0, t), projectH(H, 1, t));
+  }
+}
+function drawPiece(ctx, p, r, active) {
+  const [x, y] = toDisplay(p.x, p.y, r);
+  const white = p.fen === p.fen.toUpperCase();
+  if (active) {
+    // While placing: a crosshair + ring so the exact contact point stays visible (a
+    // filled disc would obscure the very spot you're aiming at); label moved above.
+    ctx.strokeStyle = "#ffce26"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 10, 0, 7); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x - 15, y); ctx.lineTo(x - 4, y); ctx.moveTo(x + 4, y); ctx.lineTo(x + 15, y);
+    ctx.moveTo(x, y - 15); ctx.lineTo(x, y - 4); ctx.moveTo(x, y + 4); ctx.lineTo(x, y + 15);
+    ctx.stroke();
+    ctx.fillStyle = "#ffce26"; ctx.font = "bold 12px ui-monospace, monospace";
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText(p.fen.toUpperCase(), x, y - 14);
+    return;
+  }
+  ctx.beginPath(); ctx.arc(x, y, 7, 0, 7);
+  ctx.fillStyle = white ? "#f5f5f5" : "#1a1a1a"; ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = white ? "#1a1a1a" : "#f5f5f5"; ctx.stroke();
+  ctx.fillStyle = white ? "#1a1a1a" : "#f5f5f5"; ctx.font = "bold 10px ui-monospace, monospace";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(p.fen.toUpperCase(), x, y);
+}
+
+/* ---------- piece dragging ---------- */
+function canvasToNative(ev) {
+  const c = $("posCanvas"), rect = c.getBoundingClientRect(), r = stageRect();
+  const [nx, ny] = toNative(ev.clientX - rect.left, ev.clientY - rect.top, r);
+  return [Math.max(0, Math.min(frozen.width, nx)), Math.max(0, Math.min(frozen.height, ny))];
+}
+function hitPiece(ev) {
+  const c = $("posCanvas"), rect = c.getBoundingClientRect(), r = stageRect();
+  const px = ev.clientX - rect.left, py = ev.clientY - rect.top;
+  const HIT = 22; let best = -1, bestD = HIT * HIT;
+  pieces.forEach((p, i) => {
+    const [dx, dy] = toDisplay(p.x, p.y, r);
+    const d = (dx - px) ** 2 + (dy - py) ** 2;
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+function onDown(ev) {
+  if (!frozen) return;
+  ev.preventDefault();
+  $("posCanvas").setPointerCapture(ev.pointerId);
+  // Middle button or Space-held -> pan; otherwise grab the nearest piece dot.
+  if (ev.button === 1 || spaceHeld) {
+    panning = { x: ev.clientX, y: ev.clientY };
+    $("posCanvas").classList.add("panning");
+    return;
+  }
+  if (!pieces.length) return;
+  const i = hitPiece(ev);
+  if (i >= 0) {
+    dragging = i;
+    const [nx, ny] = canvasToNative(ev);
+    grabOff = [pieces[i].x - nx, pieces[i].y - ny];  // hold the grab point; don't snap to cursor
+    redraw();
+  }
+}
+function onMove(ev) {
+  if (panning) {
+    if (!view) view = fitView();
+    view = { scale: view.scale, offx: view.offx + (ev.clientX - panning.x), offy: view.offy + (ev.clientY - panning.y) };
+    panning = { x: ev.clientX, y: ev.clientY };
+    clampView(); redraw();
+    return;
+  }
+  if (dragging === null) return;
+  const [x, y] = canvasToNative(ev);
+  pieces[dragging].x = Math.max(0, Math.min(frozen.width, x + grabOff[0]));
+  pieces[dragging].y = Math.max(0, Math.min(frozen.height, y + grabOff[1]));
+  redraw();
+}
+function onUp() {
+  if (panning) { panning = null; $("posCanvas").classList.remove("panning"); }
+  if (dragging !== null) { dragging = null; redraw(); }
+}
+
+/* ---------- save ---------- */
+async function save() {
+  if (!cur || !corners || !pieces.length) return;
+  const board = cur.board || localStorage.getItem("cv_corner_board") || "";
+  const r = await postJson("/api/positions/save", {
+    src: cur.src, corners, fen: currentFen(), orientation: ORIENTATIONS[orientIdx],
+    pieces: pieces.map((p) => ({ label: p.label, x: p.x, y: p.y })), board,
+  });
+  cur.positioned = true; cur.fen = r ? currentFen() : cur.fen;
+  const local = photos.find((p) => p.src === cur.src);
+  if (local) { local.positioned = true; local.fen = currentFen(); local.orientation = ORIENTATIONS[orientIdx]; }
+  toast(`Saved ${r.n_pieces} pieces ✓`);
+}
+
+/* ---------- controls / library ---------- */
+function refreshControls() {
+  $("markBtn").disabled = !frozen;
+  $("orientBtn").disabled = !frozen;
+  $("orientBtn").textContent = `a8 ⟳ · ${ORIENTATIONS[orientIdx]}`;
+  $("projectBtn").disabled = !(frozen && corners && currentFen());
+  $("saveBtn").disabled = !(frozen && corners && pieces.length);
+  $("progress").textContent = cur
+    ? `${cur.src.split("/").pop()}${corners ? "" : " · no corners"}${pieces.length ? ` · ${pieces.length} pieces` : ""}`
+    : "—";
+}
+async function loadLibrary() {
+  try { library = await fetch("/api/positions/library").then(j); } catch { library = {}; }
+  const sel = $("fenSelect");
+  sel.innerHTML = '<option value="">— position —</option>';
+  Object.keys(library).sort().forEach((name) => {
+    const o = document.createElement("option"); o.value = name; o.textContent = name; sel.appendChild(o);
+  });
+}
+async function addToLibrary() {
+  const fen = currentFen();
+  if (!fen) return toast("Paste a FEN first");
+  const name = prompt("Name this position (e.g. start, ruy-lopez-12):");
+  if (!name) return;
+  try { library = await postJson("/api/positions/library", { name: name.trim(), fen }); }
+  catch (e) { return toast("Save failed: " + e.message); }
+  await loadLibrary();
+  $("fenSelect").value = name.trim();
+  toast("Saved to library ✓");
+}
+
+/* ---------- wiring ---------- */
+$("pickBtn").onclick = () => { $("picker").classList.add("show"); loadInbox(); };
+$("pickClose").onclick = () => $("picker").classList.remove("show");
+$("reloadBtn").onclick = () => loadInbox();
+$("markBtn").onclick = markCorners;
+$("orientBtn").onclick = () => rotate();
+$("projectBtn").onclick = () => project().catch((e) => toast(e.message));
+$("saveBtn").onclick = () => save().catch((e) => toast(e.message));
+$("addLibBtn").onclick = () => addToLibrary();
+$("fenInput").oninput = refreshControls;
+$("fenSelect").onchange = (e) => { if (library[e.target.value]) { $("fenInput").value = library[e.target.value]; refreshControls(); } };
+$("posCanvas").addEventListener("pointerdown", onDown);
+$("posCanvas").addEventListener("pointermove", onMove);
+$("posCanvas").addEventListener("pointerup", onUp);
+$("posCanvas").addEventListener("pointercancel", onUp);
+$("posCanvas").addEventListener("contextmenu", (e) => e.preventDefault());
+$("posCanvas").addEventListener("wheel", onWheel, { passive: false });
+$("zoomIn").onclick = () => zoomCenter(1.5);
+$("zoomOut").onclick = () => zoomCenter(1 / 1.5);
+$("zoomFit").onclick = () => zoomCenter(1, true);
+$("zoom2x").onclick = () => zoomCenter(2, true);
+$("zoom4x").onclick = () => zoomCenter(4, true);
+// Space toggles a pan ("hand") gesture so left-drag pans instead of moving a piece.
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" && e.target.tagName !== "INPUT" && !spaceHeld) {
+    spaceHeld = true; $("posCanvas").classList.add("pan"); e.preventDefault();
+  }
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "Space") { spaceHeld = false; $("posCanvas").classList.remove("pan"); }
+});
+// On resize the fit changes; reset to fit (precise work happens after re-zooming anyway).
+window.addEventListener("resize", () => { if (frozen) { view = null; redraw(); } });
+
+(async function init() {
+  let avail = false;
+  try { avail = (await fetch("/api/positions/available").then(j)).available; } catch { /* off */ }
+  if (!avail) { $("stageHint").textContent = "Position-label mode is off — launch the app with --corners-root."; return; }
+  await CM.checkAssist();
+  await loadLibrary();
+})();
+</script>
+</body>
+</html>

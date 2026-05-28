@@ -30,6 +30,7 @@ from chessvision.geometry import (
     canonical_to_image,
     compute_homography,
     lattice_points,
+    order_corners,
     square_center_uv,
     square_polygons,
 )
@@ -68,6 +69,45 @@ class CornerLabelIn(BaseModel):
     board: str | None = None
     device: str | None = None
     surface: str | None = None
+
+
+class PiecePointIn(BaseModel):
+    """One placed piece: a verbose keypoint label (e.g. "WhiteRook") and its contact
+    point [x, y] in the normalized image frame."""
+
+    label: str
+    x: float
+    y: float
+
+
+class PositionProjectIn(BaseModel):
+    """Project a known FEN onto a photo's corners (no save). `corners` are four [x, y]
+    points in the normalized frame, any order; `orientation` is R0..R270 (which physical
+    corner is a8 — the manual choice); `fen` is a placement field or full FEN."""
+
+    corners: list[tuple[float, float]]
+    fen: str
+    orientation: str = "R0"
+
+
+class PositionSaveIn(BaseModel):
+    """Save a position label: the photo `src`, its corners, the known FEN + orientation,
+    and the nudged piece contact keypoints. Written into the corner store as a piece-
+    keypoint training sample (no Label Studio)."""
+
+    src: str
+    corners: list[tuple[float, float]]
+    fen: str
+    orientation: str = "R0"
+    pieces: list[PiecePointIn]
+    board: str | None = None
+
+
+class PositionLibraryIn(BaseModel):
+    """Add/replace a named position in the reusable FEN library."""
+
+    name: str
+    fen: str
 
 
 class CaptureCornersIn(BaseModel):
@@ -287,6 +327,10 @@ def create_app(
 
     app = FastAPI(title="chessvision capture")
     app.mount("/captures", StaticFiles(directory=str(out_root)), name="captures")
+    # Shared static assets (cv.js etc.) for the page templates served below. The HTML
+    # pages themselves are returned by explicit routes (/, /capture, /live, ...) so the
+    # mount is for sidecar assets only, not the entry pages.
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     def get_session(session_id: str) -> Session:
         session = sessions.get(session_id)
@@ -351,13 +395,40 @@ def create_app(
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
+        """Launcher hub: cards linking to each capture/labelling tool."""
         return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    @app.get("/capture", response_class=HTMLResponse)
+    def capture_page() -> str:
+        """Capture mode: label a known game/puzzle — mark corners, snap each ply."""
+        return (STATIC_DIR / "capture.html").read_text(encoding="utf-8")
+
+    @app.get("/corners", response_class=HTMLResponse)
+    def corners_page() -> str:
+        """Corner-label mode: mark board corners on staged phone photos."""
+        return (STATIC_DIR / "corners.html").read_text(encoding="utf-8")
+
+    @app.get("/positions", response_class=HTMLResponse)
+    def positions_page() -> str:
+        """Position-label mode: project a known FEN onto a corner photo and nudge bases."""
+        return (STATIC_DIR / "positions.html").read_text(encoding="utf-8")
+
+    @app.get("/sessions", response_class=HTMLResponse)
+    def sessions_page() -> str:
+        """Session-metadata editor: tag past sessions with set/board/camera/surface."""
+        return (STATIC_DIR / "sessions.html").read_text(encoding="utf-8")
 
     @app.get("/validate", response_class=HTMLResponse)
     def validate_page() -> str:
         """Read-only browser for capture corners: page through every frame with the
         current (labelled) grid overlaid, plus the model's grid for comparison."""
         return (STATIC_DIR / "validate.html").read_text(encoding="utf-8")
+
+    @app.get("/live", response_class=HTMLResponse)
+    def live_page() -> str:
+        """Standalone Read-position view: camera -> mark corners -> predicted FEN, with
+        an optional additive heatmap overlay of the 81-point lattice corner regressor."""
+        return (STATIC_DIR / "live.html").read_text(encoding="utf-8")
 
     @app.get("/api/games")
     def list_games() -> list[dict]:
@@ -689,8 +760,17 @@ def create_app(
 
     @app.get("/api/corners/available")
     def corners_available() -> dict:
-        """Whether corner-assist is wired (a corner checkpoint was provided at launch)."""
-        return {"available": corner_predictor is not None}
+        """Whether corner-assist is wired (a corner checkpoint was provided at launch).
+
+        `heatmap` is True only for a lattice checkpoint — the additive 81-point overlay
+        is only meaningful for that variant; a 4-corner model would just emit 4 blobs.
+        """
+        if corner_predictor is None:
+            return {"available": False, "heatmap": False}
+        # Read the lazy flag without forcing a load: we only know once the model is loaded,
+        # so fall back to False here and let the live page re-probe after a real call.
+        is_lattice = bool(getattr(corner_predictor, "_is_lattice", False))
+        return {"available": True, "heatmap": is_lattice}
 
     @app.post("/api/corners/predict")
     async def corners_predict(image: UploadFile) -> dict:
@@ -713,6 +793,32 @@ def create_app(
         except Exception as exc:  # model failure -> 500 with the reason
             raise HTTPException(500, f"corner prediction failed: {exc}") from exc
         return {"corners": corners}
+
+    @app.post("/api/corners/heatmap")
+    async def corners_heatmap(image: UploadFile) -> Response:
+        """Summed lattice heatmap as a grayscale PNG, for the live-view overlay.
+
+        Each of the lattice model's 81 channels is a per-point spatial softmax; summing
+        them gives a single map whose peaks lie on the predicted grid intersections. The
+        client stretches this PNG over the frame with additive blending so the user can
+        see the model's confidence (and any drift / dropouts) across the board. Only
+        meaningful for a lattice checkpoint; falls back to the 4-corner blobs otherwise.
+        """
+        if corner_predictor is None:
+            raise HTTPException(503, "Corner-assist is off (launch with --corner-ckpt)")
+        data = await image.read()
+        if not data:
+            raise HTTPException(400, "empty image upload")
+        bgr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise HTTPException(400, "could not decode image")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        try:
+            heat = corner_predictor.heatmap(rgb)
+        except Exception as exc:
+            raise HTTPException(500, f"heatmap failed: {exc}") from exc
+        png = cv2.imencode(".png", (heat * 255.0).clip(0, 255).astype(np.uint8))[1].tobytes()
+        return Response(content=png, media_type="image/png")
 
     @app.get("/api/corners-label/available")
     def corner_label_available() -> dict:
@@ -776,6 +882,127 @@ def create_app(
         except Exception as exc:  # save / encode failure
             raise HTTPException(500, f"save failed: {exc}") from exc
         return {"id": label.id, "src": label.src, "board": label.board, "labeled": True}
+
+    # ---- position-label mode (project a known FEN, nudge piece bases) ------ #
+    # Builds on the corner store: a photo's corners + a known FEN + the chosen
+    # orientation project to per-piece contact points (geometry, no manual class
+    # labelling), which the user nudges and saves as keypoint training samples.
+
+    @app.get("/api/positions/available")
+    def positions_available() -> dict:
+        """Whether position-label mode is wired (--corners-root) and whether corner-assist
+        prediction is also available (--corner-ckpt)."""
+        return {"available": corner_store is not None, "predict": corner_predictor is not None}
+
+    @app.get("/api/positions/inbox")
+    def positions_inbox() -> list[dict]:
+        """Every inbox photo with its corner + position state — drives the position
+        browser. `positioned` flags photos that already have pieces placed."""
+        store = _require_corner_store()
+        return [
+            {
+                "id": p.id,
+                "src": p.src,
+                "group": p.group,
+                "date": p.date,
+                "labeled": p.labeled,  # has corners
+                "board": p.board,
+                "corners": p.corners,
+                "positioned": p.positioned,
+                "fen": p.fen,
+                "orientation": p.orientation,
+                "pieces": p.pieces,
+            }
+            for p in store.list_inbox()
+        ]
+
+    @app.get("/api/positions/image")
+    def positions_image(src: str, w: int | None = None) -> Response:
+        """The EXIF-normalized JPEG for an inbox photo (same pixels corners/pieces are
+        stored against). `w` downscales for thumbnails."""
+        store = _require_corner_store()
+        try:
+            data = store.normalized_bytes(src, max_width=w)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:  # decode failure -> surface the reason
+            raise HTTPException(400, f"could not read image: {exc}") from exc
+        return Response(content=data, media_type="image/jpeg")
+
+    @app.get("/api/positions/library")
+    def positions_library() -> dict[str, str]:
+        """Saved {name: FEN} entries reused across same-setup photos."""
+        return _require_corner_store().load_positions_library()
+
+    @app.post("/api/positions/library")
+    def positions_library_add(body: PositionLibraryIn) -> dict[str, str]:
+        store = _require_corner_store()
+        try:
+            from chessvision.data.positions import parse_board_fen
+
+            parse_board_fen(body.fen)  # validate before storing
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid FEN: {exc}") from exc
+        return store.save_position_entry(body.name.strip(), body.fen.strip())
+
+    def _orientation(name: str) -> Orientation:
+        try:
+            return Orientation[name]
+        except KeyError as exc:
+            raise HTTPException(400, "orientation must be one of R0/R90/R180/R270") from exc
+
+    @app.post("/api/positions/project")
+    def positions_project(body: PositionProjectIn) -> dict:
+        """Project a known FEN through the photo's corners -> starting contact points.
+
+        Returns one point per piece (`{label, fen, square, x, y}` in the normalized
+        frame) plus a reference board SVG so the user can confirm the orientation."""
+        _require_corner_store()
+        if len(body.corners) != 4:
+            raise HTTPException(400, "corners must be exactly four [x, y] points")
+        from chessvision.data.positions import project_position
+        from chessvision.inference import full_fen
+
+        corners = order_corners(body.corners)
+        try:
+            pieces = project_position(corners, body.fen, _orientation(body.orientation))
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid FEN: {exc}") from exc
+        return {
+            "pieces": pieces,
+            "board_svg": render_board_svg(full_fen(body.fen.split(" ", 1)[0]), None, "white"),
+        }
+
+    @app.post("/api/positions/save")
+    def positions_save(body: PositionSaveIn) -> dict:
+        """Store corners + the known FEN/orientation + nudged contact keypoints as a
+        piece-keypoint training sample."""
+        store = _require_corner_store()
+        if len(body.corners) != 4:
+            raise HTTPException(400, "corners must be exactly four [x, y] points")
+        if not body.pieces:
+            raise HTTPException(400, "no pieces placed")
+        _orientation(body.orientation)  # validate
+        try:
+            label = store.save_label(
+                body.src,
+                body.corners,
+                board=body.board or "",
+                fen=body.fen.split(" ", 1)[0],
+                orientation=body.orientation,
+                pieces=[p.model_dump() for p in body.pieces],
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:  # save / encode failure
+            raise HTTPException(500, f"save failed: {exc}") from exc
+        return {
+            "id": label.id,
+            "src": label.src,
+            "board": label.board,
+            "positioned": True,
+            "n_pieces": len(label.pieces),
+        }
 
     # ---- capture corner-validation mode ----------------------------------- #
     # Review/fix the corners on captured frames and push the correction into Label
@@ -879,7 +1106,9 @@ def create_app(
         # training re-canonicalizes by position anyway, so we never relabel -- just move points).
         corner_rs = [r for r in result if r.get("from_name") == "corners"]
         if len(corner_rs) != 4:
-            raise HTTPException(500, f"annotation has {len(corner_rs)} corner keypoints, expected 4")
+            raise HTTPException(
+                500, f"annotation has {len(corner_rs)} corner keypoints, expected 4"
+            )
         pts = [(float(x), float(y)) for x, y in body.corners]
         used: set[int] = set()
         for r in corner_rs:

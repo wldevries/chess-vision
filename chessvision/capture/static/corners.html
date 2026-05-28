@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>chessvision — label corners</title>
+<style>
+  :root {
+    --bg: #15171c; --panel: #1f232b; --line: #2c313b; --fg: #e7e9ee;
+    --muted: #9aa3b2; --accent: #4f8cff; --good: #36c46b; --bad: #ff5d5d;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+  }
+  header {
+    display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  header .title { font-weight: 700; letter-spacing: .3px; }
+  header .spacer { flex: 1; }
+  a.backlink { color: var(--muted); text-decoration: none; padding: 8px 10px; border-radius: 8px; }
+  a.backlink:hover { background: #262b34; color: var(--fg); }
+  select, button {
+    font: inherit; color: var(--fg); background: #262b34; border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 14px; cursor: pointer;
+  }
+  select { max-width: 44vw; }
+  button:active { transform: translateY(1px); }
+  button.primary { background: var(--accent); border-color: var(--accent); font-weight: 700; }
+  button:disabled { opacity: .4; cursor: default; }
+  .muted { color: var(--muted); font-size: 14px; }
+
+  main { flex: 1; display: flex; padding: 14px; min-height: 0; }
+  .pane { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+          padding: 12px; display: flex; flex-direction: column; min-height: 0; }
+  .pane h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+             display: flex; align-items: center; gap: 10px; }
+
+  .corner-modal { position: fixed; inset: 0; background: #000; display: none; z-index: 40; flex-direction: column; }
+  .corner-modal.show { display: flex; }
+  .corner-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+                    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .corner-toolbar .hint { flex: 1; min-width: 200px; color: var(--fg); font-size: 14px; }
+  .corner-toolbar .tag-progress { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--muted);
+                                  background: var(--bg); border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; }
+  .corner-toolbar .tag-progress b { color: var(--accent); font-weight: 700; }
+  .corner-toolbar .exit { margin-left: 22px; }
+  .corner-toolbar select { max-width: 220px; }
+  .corner-canvas-area { flex: 1; position: relative; min-height: 0; }
+  #cornerCanvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
+  /* Corner inbox browser */
+  .corner-browser { flex: 1; min-height: 0; overflow-y: auto; padding: 4px; }
+  .corner-browser .cb-empty { color: var(--muted); padding: 24px; text-align: center; }
+  .cb-group-head { color: var(--muted); font-size: 13px; text-transform: uppercase;
+                   letter-spacing: .06em; margin: 14px 4px 8px; position: sticky; top: 0;
+                   background: var(--panel); padding: 4px 0; }
+  .cb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 10px; }
+  .cb-thumb { position: relative; border: 1px solid var(--line); border-radius: 10px;
+              overflow: hidden; background: #000; cursor: pointer; aspect-ratio: 4/3; }
+  .cb-thumb:hover { border-color: var(--accent); }
+  .cb-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cb-thumb.done { border-color: var(--good); }
+  .cb-badge { position: absolute; top: 6px; right: 6px; font-size: 12px; font-weight: 700;
+              padding: 2px 7px; border-radius: 999px; background: #000a; color: var(--fg); }
+  .cb-thumb.done .cb-badge { background: var(--good); color: #06210f; }
+  .cb-tag { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; padding: 2px 6px;
+            background: rgba(0,0,0,.6); color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .toast { position: fixed; left: 50%; bottom: 80px; transform: translateX(-50%);
+           background: #000a; border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px;
+           opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 30; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">♟ Label corners</span>
+    <a class="backlink" href="/" title="Back to menu">☰ menu</a>
+    <button id="reloadBtn" title="Re-scan the inbox folder">↻ reload</button>
+    <span class="spacer"></span>
+    <span class="muted" id="cornerProgress"></span>
+    <button id="startTagging" hidden>Start tagging ▶</button>
+  </header>
+
+  <main>
+    <section class="pane">
+      <h2>Corner inbox</h2>
+      <div class="corner-browser" id="cornerBrowser">
+        <div class="cb-empty">Drop phone photos into the inbox folder, then reload.</div>
+      </div>
+    </section>
+  </main>
+
+  <div class="corner-modal" id="cornerModal">
+    <div class="corner-toolbar">
+      <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
+      <span class="tag-progress" id="taggingProgress" hidden></span>
+      <select id="cornerBoard" title="Board for this photo (remembered)"></select>
+      <button id="predictCorner" hidden>Predict</button>
+      <button id="saveCorner" class="primary" disabled>Save</button>
+      <button id="cancelCorner" class="exit">Close</button>
+    </div>
+    <div class="corner-canvas-area">
+      <canvas id="cornerCanvas"></canvas>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <canvas id="canvas" hidden></canvas>
+
+<script src="/static/cv.js"></script>
+<script>
+// Corner-label mode: mark board corners on staged phone photos. The marking modal (CM)
+// and grid math come from cv.js; this file is the inbox browser + save/advance loop.
+let photos = [];        // inbox listing from /api/corners-label/inbox
+let curSrc = null;      // src of the photo currently open in the modal
+
+async function checkAvailable() {
+  let avail = false;
+  try { avail = (await fetch("/api/corners-label/available").then(j)).available; } catch { /* off */ }
+  if (!avail) {
+    $("cornerBrowser").innerHTML = '<div class="cb-empty">Corner-label mode is off — launch the app with <code>--corners-root</code>.</div>';
+    $("reloadBtn").disabled = true; $("startTagging").hidden = true;
+    return false;
+  }
+  return true;
+}
+async function loadBoards() {
+  try {
+    const m = await fetch("/api/meta").then(j);
+    const sel = $("cornerBoard"); sel.innerHTML = "";
+    const blank = document.createElement("option"); blank.value = ""; blank.textContent = "(board?)"; sel.appendChild(blank);
+    m.boards.forEach((v) => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
+    const saved = localStorage.getItem("cv_corner_board");
+    if (saved && m.boards.includes(saved)) sel.value = saved;
+    sel.onchange = () => localStorage.setItem("cv_corner_board", sel.value);
+  } catch { /* no boards.json -> stays blank, photos go untagged */ }
+}
+async function loadInbox() {
+  const el = $("cornerBrowser");
+  el.innerHTML = '<div class="cb-empty">Loading…</div>';
+  try { photos = await fetch("/api/corners-label/inbox").then(j); }
+  catch (e) { el.innerHTML = `<div class="cb-empty">Load failed: ${e.message}</div>`; return; }
+  renderBrowser();
+}
+function updateProgress() {
+  const n = photos.filter((p) => p.labeled).length, remaining = photos.length - n;
+  $("cornerProgress").textContent = photos.length ? `${n}/${photos.length} labelled` : "";
+  const btn = $("startTagging");
+  btn.hidden = remaining <= 0;  // nothing left -> hide (re-open from a thumbnail for QA)
+  btn.textContent = n ? `Resume tagging ▶ (${remaining} left)` : "Start tagging ▶";
+}
+function tagProgressHtml(src) {
+  const total = photos.length, pos = photos.findIndex((p) => p.src === src) + 1;
+  const done = photos.filter((p) => p.labeled).length;
+  return `photo <b>${pos}</b>/${total} · ${done}/${total} labelled`;
+}
+function startTagging() {
+  const next = photos.find((p) => !p.labeled);
+  if (next) openPhoto(next);
+  else toast("All photos labelled ✓");
+}
+function thumb(p) {
+  const d = document.createElement("div");
+  d.className = "cb-thumb" + (p.labeled ? " done" : "");
+  const img = document.createElement("img"); img.loading = "lazy"; img.alt = "";
+  img.src = `/api/corners-label/image?w=240&src=${encodeURIComponent(p.src)}`;
+  const badge = document.createElement("span"); badge.className = "cb-badge"; badge.textContent = p.labeled ? "✓" : "·";
+  const tag = document.createElement("span"); tag.className = "cb-tag";
+  tag.textContent = p.src.split("/").pop() + (p.board ? ` · ${p.board}` : "");
+  d.append(img, badge, tag);
+  d.onclick = () => openPhoto(p);
+  return d;
+}
+function renderBrowser() {
+  const el = $("cornerBrowser");
+  if (!photos.length) {
+    el.innerHTML = '<div class="cb-empty">No photos in the inbox. Drop images into the inbox folder and reload.</div>';
+    updateProgress(); return;
+  }
+  const order = [], byKey = {};
+  photos.forEach((p) => { const k = p.group || "(inbox root)"; if (!byKey[k]) { byKey[k] = []; order.push(k); } byKey[k].push(p); });
+  el.innerHTML = "";
+  order.forEach((k) => {
+    const head = document.createElement("div"); head.className = "cb-group-head"; head.textContent = k; el.appendChild(head);
+    const grid = document.createElement("div"); grid.className = "cb-grid";
+    byKey[k].forEach((p) => grid.appendChild(thumb(p)));
+    el.appendChild(grid);
+  });
+  updateProgress();
+}
+// Open the marking modal on a still photo. Loads the EXIF-normalized image (the same
+// pixels the corners are stored against), seeds handles from any saved corners, and
+// auto-predicts a starting board when nothing is saved yet (and predict is wired).
+function openPhoto(photo) {
+  const img = new Image();
+  img.onload = () => {
+    const frozen = document.createElement("canvas");
+    frozen.width = img.naturalWidth; frozen.height = img.naturalHeight;
+    frozen.getContext("2d").drawImage(img, 0, 0);
+    curSrc = photo.src;
+    CM.open(frozen, {
+      initialPts: (photo.corners && photo.corners.length === 4) ? photo.corners : [],
+      autoPredict: true,
+      tagProgress: tagProgressHtml(photo.src),
+      onSave: saveLabel,
+    });
+  };
+  img.onerror = () => toast("Could not load photo");
+  img.src = `/api/corners-label/image?src=${encodeURIComponent(photo.src)}`;
+}
+async function saveLabel(o) {
+  const board = $("cornerBoard").value || "";
+  await postJson("/api/corners-label/save", { src: curSrc, corners: [o.tl, o.tr, o.br, o.bl], board });
+  const cur = photos.find((p) => p.src === curSrc);
+  if (cur) { cur.labeled = true; cur.board = board; cur.corners = [o.tl, o.tr, o.br, o.bl]; }
+  renderBrowser();
+  const idx = photos.findIndex((p) => p.src === curSrc);
+  const next = photos.slice(idx + 1).find((p) => !p.labeled) || photos.find((p) => !p.labeled);
+  if (next) { openPhoto(next); toast("Saved ✓ — next"); }
+  else { CM.close(); toast("All photos labelled ✓"); }
+}
+
+/* ---------- wiring ---------- */
+$("reloadBtn").onclick = () => loadInbox();
+$("startTagging").onclick = startTagging;
+
+(async function init() {
+  if (!(await checkAvailable())) return;
+  await CM.checkAssist();
+  await loadBoards();
+  await loadInbox();
+})();
+</script>
+</body>
+</html>

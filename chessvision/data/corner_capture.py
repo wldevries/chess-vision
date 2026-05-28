@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -87,6 +88,18 @@ def _stable_id(src: str) -> str:
     return hashlib.sha1(src.encode("utf-8")).hexdigest()[:16]
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically: write a sibling temp file, then os.replace.
+
+    The rename is atomic on the same filesystem, so a process killed mid-write leaves the
+    old file intact instead of a truncated one -- the only real corruption mode for these
+    whole-file JSON/JSONL stores (see the SQLite-vs-text discussion; text + atomic rename
+    gives the durability without losing inspectability or the S3-object sync model)."""
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def _task_id(label_id: str) -> int:
     """Deterministic int id for pose-clustering order (stable across re-labels)."""
     return int(label_id[:8], 16)
@@ -114,13 +127,24 @@ class CornerLabel:
     device: str = ""
     surface: str = ""
     labeled_at: str = ""
+    # Optional *position* labels (the in-app position tool, see chessvision/data/positions.py):
+    # the known FEN placement field, the orientation chosen to match the photo, and the
+    # nudged per-piece contact keypoints. Corner-only photos leave these empty.
+    fen: str = ""
+    orientation: str = ""  # "R0".."R270"
+    # (verbose label, x, y) per placed piece, in the normalized frame.
+    pieces: tuple[tuple[str, float, float], ...] = ()
 
     @property
     def has_all_corners(self) -> bool:
         return set(self.corners) == CORNER_KEYS
 
+    @property
+    def has_pieces(self) -> bool:
+        return bool(self.pieces) and self.has_all_corners
+
     def to_row(self) -> dict:
-        return {
+        row = {
             "id": self.id,
             "src": self.src,
             "image": self.image,
@@ -132,9 +156,19 @@ class CornerLabel:
             "surface": self.surface,
             "labeled_at": self.labeled_at,
         }
+        if self.pieces:
+            row["fen"] = self.fen
+            row["orientation"] = self.orientation
+            row["pieces"] = [
+                {"label": lbl, "x": float(x), "y": float(y)} for lbl, x, y in self.pieces
+            ]
+        return row
 
     @classmethod
     def from_row(cls, row: dict) -> CornerLabel:
+        pieces = tuple(
+            (p["label"], float(p["x"]), float(p["y"])) for p in row.get("pieces", []) or []
+        )
         return cls(
             id=row["id"],
             task_id=_task_id(row["id"]),
@@ -147,6 +181,9 @@ class CornerLabel:
             device=row.get("device", "") or "",
             surface=row.get("surface", "") or "",
             labeled_at=row.get("labeled_at", "") or "",
+            fen=row.get("fen", "") or "",
+            orientation=row.get("orientation", "") or "",
+            pieces=pieces,
         )
 
 
@@ -166,6 +203,13 @@ class InboxPhoto:
     # Saved corners (TL/TR/BR/BL, [x, y] in the normalized frame) if labelled, else None —
     # lets the UI re-open a labelled photo with its handles already in place.
     corners: list[list[float]] | None = None
+    # Position labels (the in-app position tool): whether pieces are placed, the FEN used,
+    # the chosen orientation, and the nudged contact keypoints — so the positions browser
+    # can flag done photos and re-open them with their handles in place.
+    positioned: bool = False
+    fen: str = ""
+    orientation: str = ""
+    pieces: list[dict] | None = None
 
 
 class CornerStore:
@@ -198,7 +242,7 @@ class CornerStore:
         self.store.mkdir(parents=True, exist_ok=True)
         ordered = sorted(rows.values(), key=lambda r: r["id"])
         body = "\n".join(json.dumps(r) for r in ordered)
-        self.labels_path.write_text(body + ("\n" if body else ""), encoding="utf-8")
+        _atomic_write_text(self.labels_path, body + ("\n" if body else ""))
 
     # ---- inbox listing ------------------------------------------------------
 
@@ -235,6 +279,7 @@ class CornerStore:
             parent = path.parent.relative_to(self.inbox).as_posix()
             row = by_src.get(src)
             corners = None
+            pieces = (row or {}).get("pieces") or None
             if row is not None:
                 c = row["corners"]
                 corners = [[float(c[k][0]), float(c[k][1])] for k in CORNER_ORDER]
@@ -247,6 +292,10 @@ class CornerStore:
                     labeled=row is not None,
                     board=(row or {}).get("board", "") or "",
                     corners=corners,
+                    positioned=bool(pieces),
+                    fen=(row or {}).get("fen", "") or "",
+                    orientation=(row or {}).get("orientation", "") or "",
+                    pieces=pieces,
                 )
             )
         photos.sort(key=lambda p: (p.date, p.src))
@@ -284,12 +333,21 @@ class CornerStore:
         board: str = "",
         device: str = "",
         surface: str = "",
+        fen: str = "",
+        orientation: str = "",
+        pieces: Sequence[dict] | None = None,
     ) -> CornerLabel:
         """Normalize the inbox photo, write its store JPEG, and upsert its label row.
 
         `corners` may be four points in any order or a corner dict; they are sorted
         into visual TL/TR/BR/BL with `order_corners`. Re-saving the same `src`
         overwrites in place (the photo's id is derived from `src`).
+
+        When `pieces` is given (the in-app position tool), the FEN, orientation, and
+        nudged contact keypoints (`[{label, x, y}, ...]`, normalized-frame pixels) are
+        stored too -- turning a corner photo into a piece-keypoint training sample. A
+        corner-only re-save (``pieces=None``) drops any previously stored position, since
+        re-marked corners invalidate the old projection.
         """
         path = self.inbox_path(src)
         rgb, (w, h) = normalize_image(path.read_bytes())
@@ -300,6 +358,9 @@ class CornerStore:
 
         pts = list(corners.values()) if isinstance(corners, dict) else list(corners)
         ordered = order_corners(pts)  # {top_left, top_right, bottom_right, bottom_left}
+        piece_tuples = tuple(
+            (str(p["label"]), float(p["x"]), float(p["y"])) for p in (pieces or [])
+        )
         label = CornerLabel(
             id=label_id,
             task_id=_task_id(label_id),
@@ -312,6 +373,9 @@ class CornerStore:
             device=device or "",
             surface=surface or "",
             labeled_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            fen=fen or "",
+            orientation=orientation or "",
+            pieces=piece_tuples,
         )
         rows = self.load_labels()
         rows[label.id] = label.to_row()
@@ -329,6 +393,37 @@ class CornerStore:
             if label.has_all_corners and (self.store / label.image).exists():
                 out.append(label)
         return out
+
+    def position_samples(self) -> list[CornerLabel]:
+        """Labels that also carry placed pieces (the keypoint-head training set from the
+        in-app position tool): all four corners, piece keypoints, and image on disk."""
+        return [s for s in self.samples() if s.has_pieces]
+
+    # ---- position library (named FENs reused across same-setup photos) ------
+
+    @property
+    def positions_library_path(self) -> Path:
+        # Under store/ so it rides along with the synced labels (sync up --prefix corners).
+        return self.store / "positions.json"
+
+    def load_positions_library(self) -> dict[str, str]:
+        """Saved {name: FEN placement field} entries; empty dict if none yet."""
+        p = self.positions_library_path
+        if not p.exists():
+            return {}
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return {str(k): str(v) for k, v in data.items()}
+        except (json.JSONDecodeError, AttributeError):
+            return {}
+
+    def save_position_entry(self, name: str, fen: str) -> dict[str, str]:
+        """Upsert one named FEN into the library and return the full updated mapping."""
+        lib = self.load_positions_library()
+        lib[name] = fen
+        self.store.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(self.positions_library_path, json.dumps(lib, indent=2, sort_keys=True))
+        return lib
 
 
 # --------------------------------------------------------------------------- #

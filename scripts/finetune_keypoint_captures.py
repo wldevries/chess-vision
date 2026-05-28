@@ -47,6 +47,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add = p.add_argument
     add("--captures", type=Path, default=Path("data/captures/label-studio.json"))
+    add(
+        "--positions-root",
+        type=Path,
+        default=None,
+        help="data/corners tree with in-app position labels; folded in as pos-<board> "
+        "sessions so a whole board can be held out via --val-sessions",
+    )
     add("--keypoint-ckpt", type=Path, default=Path("runs/keypoint/best.pt"))
     add("--detector-ckpt", type=Path, default=Path("runs/detector/best.pt"))
     add("--val-sessions", default=DEFAULT_VAL_SESSIONS, help="comma-separated held-out sessions")
@@ -109,8 +116,25 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device(args.device)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset = CaptureDataset.load(args.captures)
+    # Sources: the Label Studio capture export and/or the in-app position labels. At
+    # least one must exist. Position labels are folded in as pos-<board> sessions so the
+    # board-keyed split below can hold a whole board out as a generalization test.
+    if args.captures.exists():
+        dataset = CaptureDataset.load(args.captures)
+    elif args.positions_root:
+        dataset = CaptureDataset(export_path=args.captures, captures_root=Path("."), samples=[])
+    else:
+        raise SystemExit(f"no captures at {args.captures} and no --positions-root given")
+    if args.positions_root:
+        from chessvision.data.positions import position_samples_as_captures
+
+        pos = position_samples_as_captures(args.positions_root)
+        print(f"positions: +{len(pos)} samples from {args.positions_root}")
+        dataset.samples = dataset.samples + pos
+
     cfg = CaptureKeypointConfig(max_size=args.max_size, hflip_prob=args.hflip, jitter=args.jitter)
+    counts = {s: len(g) for s, g in sorted(dataset.by_session().items())}
+    print(f"sessions ({len(counts)}): {json.dumps(counts)}")
     val_sessions = [s for s in args.val_sessions.split(",") if s]
     train_ds, val_ds = split_by_sessions(dataset, val_sessions, cfg)
     print(
