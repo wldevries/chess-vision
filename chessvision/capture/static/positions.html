@@ -91,9 +91,11 @@
   .corner-canvas-area { flex: 1; position: relative; min-height: 0; }
   #cornerCanvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
 
-  .toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%);
-           background: #000a; border: 1px solid var(--line); padding: 10px 16px; border-radius: 10px;
-           opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 50; }
+  /* Top-centre, just under the header, so it lands near the Save button (top-right)
+     instead of bottom-of-screen where it was easy to miss. */
+  .toast { position: fixed; left: 50%; top: 64px; transform: translateX(-50%);
+           background: #0c0e12ee; border: 1px solid var(--accent); padding: 10px 16px; border-radius: 10px;
+           box-shadow: 0 6px 20px #000a; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 50; }
   .toast.show { opacity: 1; }
 </style>
 </head>
@@ -138,7 +140,8 @@
         <b>1.</b> Choose a photo (corner-labelled ones are ready; others need <b>Corners</b> first).<br>
         <b>2.</b> Pick the position's FEN (reused across same-setup photos).<br>
         <b>3.</b> Tap <b>a8 ⟳</b> until the projected pieces sit on the right squares.<br>
-        <b>4.</b> Drag each piece dot onto the true base, then <b>Save</b>.
+        <b>4.</b> Drag each piece dot onto the true base, then <b>Save</b>.<br>
+        <span style="opacity:.8">Shortcuts: <b>Ctrl+Enter</b> save · <b>Ctrl++/Ctrl+−</b> zoom</span>
       </div>
     </section>
   </main>
@@ -184,6 +187,7 @@ let pieces = [];       // [{label, fen, square, x, y}] in native px (x,y get nud
 let orientIdx = 0;     // index into ORIENTATIONS
 let dragging = null;   // index of the piece dot being dragged
 let grabOff = [0, 0];  // (piece - cursor) at grab, so the dot doesn't jump to the cursor
+let dirty = false;     // a piece has been nudged since the last project/open -> re-projecting would lose it
 let library = {};
 // Pan/zoom view: maps native photo px -> canvas px as `canvas = native*scale + off`
 // (same shape as containRect, so cv.js toDisplay/toNative work on it directly). null ->
@@ -230,6 +234,17 @@ function thumb(p) {
   return d;
 }
 
+// Next photo that still needs positioning, scanning from just after `afterSrc` (wrapping
+// to the top). Prefers ones that already have corners so it's ready to project; falls back
+// to any un-positioned photo. `afterSrc` null -> scan from the start (used on load).
+function nextToLabel(afterSrc) {
+  if (!photos.length) return null;
+  let start = 0;
+  if (afterSrc) { const i = photos.findIndex((p) => p.src === afterSrc); start = i < 0 ? 0 : i + 1; }
+  const ring = photos.slice(start).concat(photos.slice(0, start));
+  return ring.find((p) => p.labeled && !p.positioned) || ring.find((p) => !p.positioned) || null;
+}
+
 /* ---------- load a photo into the stage ---------- */
 function openPhoto(p) {
   const img = new Image();
@@ -246,6 +261,7 @@ function openPhoto(p) {
     $("stageHint").style.display = "none";
     $("zoomCtl").hidden = false;
     view = null;  // reset to fit for the new photo
+    dirty = false;  // freshly loaded placements; nothing to lose yet
     refreshControls();
     if (pieces.length) renderRef(null);
     redraw();
@@ -279,12 +295,20 @@ async function project() {
   if (!fen) return toast("Pick or paste a FEN first");
   const r = await postJson("/api/positions/project", { corners, fen, orientation: ORIENTATIONS[orientIdx] });
   pieces = r.pieces.map((q) => ({ label: q.label, fen: q.fen, square: q.square, x: q.x, y: q.y }));
+  dirty = false;  // back to a clean projection
   renderRef(r.board_svg);
   refreshControls();
   redraw();
   toast(`Projected ${pieces.length} pieces · ${ORIENTATIONS[orientIdx]} — rotate if they sit wrong, then nudge`);
 }
+// Returns true if it's safe to throw away the current placements (nothing nudged, or the
+// user confirms). Re-projecting (rotate / Project) replaces every piece's x,y, so guard it.
+function confirmDiscard(action) {
+  if (!dirty || !pieces.length) return true;
+  return confirm(`${action} will re-project and DISCARD your manual piece placements on this photo.\n\nContinue?`);
+}
 function rotate() {
+  if (!confirmDiscard("Rotating")) return;
   orientIdx = (orientIdx + 1) % 4;
   refreshControls();
   if (currentFen() && corners) project().catch((e) => toast(e.message));  // re-project at new orientation
@@ -447,6 +471,7 @@ function onMove(ev) {
   const [x, y] = canvasToNative(ev);
   pieces[dragging].x = Math.max(0, Math.min(frozen.width, x + grabOff[0]));
   pieces[dragging].y = Math.max(0, Math.min(frozen.height, y + grabOff[1]));
+  dirty = true;  // manual placement now differs from the projection
   redraw();
 }
 function onUp() {
@@ -465,7 +490,11 @@ async function save() {
   cur.positioned = true; cur.fen = r ? currentFen() : cur.fen;
   const local = photos.find((p) => p.src === cur.src);
   if (local) { local.positioned = true; local.fen = currentFen(); local.orientation = ORIENTATIONS[orientIdx]; }
-  toast(`Saved ${r.n_pieces} pieces ✓`);
+  // Advance to the next photo needing work (the FEN stays in the input for same-setup
+  // batches, since openPhoto only overwrites it when the new photo already has one).
+  const nxt = nextToLabel(cur.src);
+  if (nxt) { toast(`Saved ${r.n_pieces} pieces ✓ · next photo`); openPhoto(nxt); }
+  else toast(`Saved ${r.n_pieces} pieces ✓ · all photos positioned 🎉`);
 }
 
 /* ---------- controls / library ---------- */
@@ -504,9 +533,11 @@ $("pickBtn").onclick = () => { $("picker").classList.add("show"); loadInbox(); }
 $("pickClose").onclick = () => $("picker").classList.remove("show");
 $("reloadBtn").onclick = () => loadInbox();
 $("markBtn").onclick = markCorners;
-$("orientBtn").onclick = () => rotate();
-$("projectBtn").onclick = () => project().catch((e) => toast(e.message));
-$("saveBtn").onclick = () => save().catch((e) => toast(e.message));
+// blur() after click so the button isn't left focused -- otherwise a stray Enter
+// (e.g. while tagging) re-fires it and silently re-projects, wiping manual placements.
+$("orientBtn").onclick = (e) => { e.currentTarget.blur(); rotate(); };
+$("projectBtn").onclick = (e) => { e.currentTarget.blur(); if (confirmDiscard("Re-projecting")) project().catch((x) => toast(x.message)); };
+$("saveBtn").onclick = (e) => { e.currentTarget.blur(); save().catch((x) => toast(x.message)); };
 $("addLibBtn").onclick = () => addToLibrary();
 $("fenInput").oninput = refreshControls;
 $("fenSelect").onchange = (e) => { if (library[e.target.value]) { $("fenInput").value = library[e.target.value]; refreshControls(); } };
@@ -523,6 +554,17 @@ $("zoom2x").onclick = () => zoomCenter(2, true);
 $("zoom4x").onclick = () => zoomCenter(4, true);
 // Space toggles a pan ("hand") gesture so left-drag pans instead of moving a piece.
 document.addEventListener("keydown", (e) => {
+  // Label Studio-style shortcuts (work even when a field is focused). Ctrl/Cmd + Enter
+  // saves; Ctrl/Cmd + +/- zoom the stage (preventDefault stops the *browser* zoom).
+  if (e.ctrlKey || e.metaKey) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (!$("saveBtn").disabled) save().catch((x) => toast(x.message));
+      return;
+    }
+    if (e.key === "+" || e.key === "=") { e.preventDefault(); zoomCenter(1.5); return; }
+    if (e.key === "-" || e.key === "_") { e.preventDefault(); zoomCenter(1 / 1.5); return; }
+  }
   if (e.code === "Space" && e.target.tagName !== "INPUT" && !spaceHeld) {
     spaceHeld = true; $("posCanvas").classList.add("pan"); e.preventDefault();
   }
@@ -539,6 +581,10 @@ window.addEventListener("resize", () => { if (frozen) { view = null; redraw(); }
   if (!avail) { $("stageHint").textContent = "Position-label mode is off — launch the app with --corners-root."; return; }
   await CM.checkAssist();
   await loadLibrary();
+  await loadInbox();  // populate photos[] so we can jump straight to the first one to label
+  const first = nextToLabel(null);
+  if (first) openPhoto(first);
+  else if (photos.length) $("stageHint").textContent = "All inbox photos are positioned 🎉";
 })();
 </script>
 </body>
