@@ -404,14 +404,21 @@ function drawPiece(ctx, p, r, active) {
   if (active) {
     // While placing: a crosshair + ring so the exact contact point stays visible (a
     // filled disc would obscure the very spot you're aiming at); label moved above.
-    ctx.strokeStyle = "#ffce26"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(x, y, 10, 0, 7); ctx.stroke();
+    // Stroke a dark halo first, then the yellow on top, so the marker stays legible on
+    // yellow/bright parts of the image too.
+    ctx.lineCap = "round";
     ctx.beginPath();
+    ctx.arc(x, y, 10, 0, 7);
     ctx.moveTo(x - 15, y); ctx.lineTo(x - 4, y); ctx.moveTo(x + 4, y); ctx.lineTo(x + 15, y);
     ctx.moveTo(x, y - 15); ctx.lineTo(x, y - 4); ctx.moveTo(x, y + 4); ctx.lineTo(x, y + 15);
-    ctx.stroke();
-    ctx.fillStyle = "#ffce26"; ctx.font = "bold 12px ui-monospace, monospace";
+    ctx.lineWidth = 4.5; ctx.strokeStyle = "#000c"; ctx.stroke();  // dark halo
+    ctx.lineWidth = 2; ctx.strokeStyle = "#ffce26"; ctx.stroke();   // bright on top
+    ctx.lineCap = "butt";
+    ctx.font = "bold 12px ui-monospace, monospace";
     ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.lineWidth = 3; ctx.lineJoin = "round"; ctx.strokeStyle = "#000c";
+    ctx.strokeText(p.fen.toUpperCase(), x, y - 14);  // outline so the label reads on any bg
+    ctx.fillStyle = "#ffce26";
     ctx.fillText(p.fen.toUpperCase(), x, y - 14);
     return;
   }
