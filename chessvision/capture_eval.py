@@ -16,7 +16,7 @@ homography from corners scaled by the same factor and keep everything in that fr
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 
 import numpy as np
@@ -47,6 +47,43 @@ def _gt_board(sample: CaptureSample) -> dict[str, int]:
 
 
 @torch.no_grad()
+def _detect_squares(
+    model: torch.nn.Module,
+    sample: CaptureSample,
+    s3: StorageConfig | None,
+    device: torch.device,
+    *,
+    max_size: int,
+    score_thresh: float,
+) -> dict[str, tuple[float, int]]:
+    """square -> (score, label) of the best detection on it, via the contact keypoint
+    mapped through the GT-corner homography. Shared by `evaluate_captures` and
+    `confusion_captures` so the two never drift apart."""
+    rgb = sample.load_image(s3)
+    h, w = rgb.shape[:2]
+    scale = min(1.0, max_size / max(h, w))
+    rgb, _, _ = resize_targets(rgb, np.zeros((0, 4), np.float32), None, max_size)
+    homography = _scaled_homography(sample, scale)
+    image = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float().to(device) / 255
+    out = model([image])[0]
+    best: dict[str, tuple[float, int]] = {}
+    for score, label, kps in zip(
+        out["scores"].tolist(),
+        out["labels"].tolist(),
+        out["keypoints"].cpu().numpy(),
+        strict=True,
+    ):
+        if score < score_thresh:
+            continue
+        sq = square_for_point(homography, (float(kps[0, 0]), float(kps[0, 1])))
+        if sq is None:
+            continue
+        if sq not in best or score > best[sq][0]:
+            best[sq] = (score, label)
+    return best
+
+
+@torch.no_grad()
 def evaluate_captures(
     model: torch.nn.Module,
     samples: Sequence[CaptureSample],
@@ -66,31 +103,9 @@ def evaluate_captures(
         if not gt:
             continue
 
-        rgb = sample.load_image(s3)
-        h, w = rgb.shape[:2]
-        scale = min(1.0, max_size / max(h, w))
-        rgb, _, _ = resize_targets(rgb, np.zeros((0, 4), np.float32), None, max_size)
-        homography = _scaled_homography(sample, scale)
-        image = (
-            torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float().to(device) / 255
+        best = _detect_squares(
+            model, sample, s3, device, max_size=max_size, score_thresh=score_thresh
         )
-        out = model([image])[0]
-
-        # Best detection per square (by score), mapped via its contact keypoint.
-        best: dict[str, tuple[float, int]] = {}
-        for score, label, kps in zip(
-            out["scores"].tolist(),
-            out["labels"].tolist(),
-            out["keypoints"].cpu().numpy(),
-            strict=True,
-        ):
-            if score < score_thresh:
-                continue
-            sq = square_for_point(homography, (float(kps[0, 0]), float(kps[0, 1])))
-            if sq is None:
-                continue
-            if sq not in best or score > best[sq][0]:
-                best[sq] = (score, label)
 
         frame_ok = True
         for sq, gt_label in gt.items():
@@ -114,3 +129,44 @@ def evaluate_captures(
         "class_acc": counts["class_correct"] / gt_pieces,
         "board_exact_rate": counts["board_exact"] / frames,
     }
+
+
+@torch.no_grad()
+def confusion_captures(
+    model: torch.nn.Module,
+    samples: Sequence[CaptureSample],
+    s3: StorageConfig | None,
+    device: torch.device,
+    *,
+    max_size: int = 1333,
+    score_thresh: float = 0.5,
+) -> tuple[Counter, Counter]:
+    """Square-level confusion over the held-out GT pieces, to show *where* class_acc
+    leaks. Returns ``(confusion, false_pos)``:
+
+    - ``confusion[(gt_label, pred_label)]`` counts each GT piece by what was predicted on
+      its square; ``pred_label`` is ``None`` when the square got no detection (a miss).
+      So the diagonal ``(c, c)`` is correct, ``(c, None)`` is missed, and ``(c, other)``
+      is misclassified-as-other.
+    - ``false_pos[pred_label]`` counts detections on squares that are empty in GT.
+
+    Uses the GT-corner homography (the ceiling path). On captures end-to-end == ceiling
+    (2026-05-29), so this faithfully attributes the class error without the corner model.
+    """
+    model.eval()
+    confusion: Counter = Counter()
+    false_pos: Counter = Counter()
+    for sample in samples:
+        gt = _gt_board(sample)
+        if not gt:
+            continue
+        best = _detect_squares(
+            model, sample, s3, device, max_size=max_size, score_thresh=score_thresh
+        )
+        for sq, gt_label in gt.items():
+            pred = best[sq][1] if sq in best else None
+            confusion[(gt_label, pred)] += 1
+        for sq, (_, label) in best.items():
+            if sq not in gt:
+                false_pos[label] += 1
+    return confusion, false_pos
