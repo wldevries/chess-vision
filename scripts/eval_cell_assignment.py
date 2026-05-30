@@ -70,6 +70,8 @@ def main() -> int:
     p.add_argument("--val-frac", type=float, default=0.25)
     p.add_argument("--lattice", action="store_true", help="checkpoint is an 81-point lattice model")
     p.add_argument("--no-conf", action="store_true", help="lattice: unweighted H-fit (ignore confidence)")
+    p.add_argument("--all-frames", action="store_true", help="score every labelled frame, not just the held-out pose split (use for a board the ckpt never trained on)")
+    p.add_argument("--board", default=None, help="restrict to one board tag")
     args = p.parse_args()
 
     device = torch.device(args.device)
@@ -82,9 +84,14 @@ def main() -> int:
         def predict(m, rgb, dev):
             return predict_corners(m, rgb, device=dev)
     store = CornerStore(args.corners_root)
-    _, heldout = select_corner_dataset_poses(
-        store, dedup_thr=args.dedup_thr, max_per_pose=args.max_per_pose, val_frac=args.val_frac
-    )
+    if args.all_frames:
+        heldout = store.samples()
+    else:
+        _, heldout = select_corner_dataset_poses(
+            store, dedup_thr=args.dedup_thr, max_per_pose=args.max_per_pose, val_frac=args.val_frac
+        )
+    if args.board:
+        heldout = [s for s in heldout if (s.board or "(untagged)") == args.board]
 
     rows = defaultdict(lambda: {"acc": [], "disp": [], "worst": [], "ok": []})
     for s in heldout:
