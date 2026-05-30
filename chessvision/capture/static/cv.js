@@ -161,8 +161,8 @@ const CM = {
   predictAvailable: false,
 
   // Probe whether the corner regressor is wired (--corner-ckpt). Returns the raw
-  // availability object (also carries `heatmap` for the live page) and toggles the
-  // Predict button. Safe to call when the button is absent.
+  // availability object and toggles the Predict button. Safe to call when the button
+  // is absent.
   async checkAssist() {
     let info = { available: false };
     try { info = await fetch("/api/corners/available").then(j); } catch { /* off */ }

@@ -32,8 +32,6 @@
   button:disabled { opacity: .4; cursor: default; }
   a.backlink { color: var(--muted); text-decoration: none; padding: 8px 10px; border-radius: 8px; }
   a.backlink:hover { background: #262b34; color: var(--fg); }
-  label.chk { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--muted); }
-  label.chk input { accent-color: var(--accent); }
   .progress { color: var(--muted); font-variant-numeric: tabular-nums; }
 
   main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; padding: 14px; min-height: 0; }
@@ -46,25 +44,10 @@
   video, .layer { position: absolute; inset: 0; width: 100%; height: 100%; }
   video { object-fit: contain; display: block; }
   .layer { pointer-events: none; }
-  /* Heatmap overlay: the server returns a grayscale PNG; the client bakes it into an
-     RGBA bitmap (alpha = intensity above floor, RGB = saturated yellow) so peaks are
-     opaque and the diffuse softmax background is transparent — natural alpha
-     compositing puts the blobs over the video, no CSS blend modes needed. The canvas
-     stays laid out at all times; `heat.on` just gates whether drawHeat paints. */
   .cam-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); text-align: center; padding: 20px; }
 
   .cam-row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
   .cam-row.grow > select { flex: 1; max-width: none; }
-
-  .corner-modal { position: fixed; inset: 0; background: #000; display: none; z-index: 40; flex-direction: column; }
-  .corner-modal.show { display: flex; }
-  .corner-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
-                    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--line); }
-  .corner-toolbar .hint { flex: 1; min-width: 200px; color: var(--fg); font-size: 14px; }
-  .corner-toolbar .exit { margin-left: 22px; }
-  .corner-canvas-area { flex: 1; position: relative; min-height: 0; }
-  #cornerCanvas { position: absolute; inset: 0; width: 100%; height: 100%;
-                  cursor: crosshair; touch-action: none; }
 
   .board-wrap { flex: 1; min-height: 0; display: grid; place-items: center; }
   .board-wrap svg { width: 100%; height: 100%; max-width: 70vh; }
@@ -93,9 +76,6 @@
     <span class="title">♟ Live read</span>
     <a class="backlink" href="/" title="Back to capture">← capture</a>
     <span class="spacer"></span>
-    <label class="chk" id="heatLabel" hidden>
-      <input type="checkbox" id="heatToggle" /> 81-point heatmap
-    </label>
     <span class="progress" id="status">—</span>
   </header>
 
@@ -106,13 +86,8 @@
         <select id="cameraSelect" title="Camera"></select>
         <button id="refreshCams" title="Re-detect cameras">↻</button>
       </div>
-      <div class="cam-row">
-        <button id="markBtn" disabled>Mark corners</button>
-        <span class="muted" id="cornerStatus">corners not set</span>
-      </div>
       <div class="camera-wrap">
         <video id="video" autoplay playsinline muted></video>
-        <canvas id="heatCanvas" class="layer"></canvas>
         <canvas id="overlayCanvas" class="layer"></canvas>
         <div class="cam-empty" id="camEmpty">Grant camera access and pick your board-facing camera.</div>
       </div>
@@ -124,7 +99,7 @@
     <section class="pane">
       <h2>Predicted position</h2>
       <div class="board-wrap" id="readBoard">
-        <span class="read-board-empty">Mark the 4 board corners, then read the position.</span>
+        <span class="read-board-empty">Point the camera at the board and press Read.</span>
       </div>
       <div class="instruction read-stat" id="readInfo">No reading yet.</div>
       <div class="fen-row">
@@ -137,165 +112,49 @@
     </section>
   </main>
 
-  <div class="corner-modal" id="cornerModal">
-    <div class="corner-toolbar">
-      <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
-      <button id="predictCorner" hidden>Predict</button>
-      <button id="saveCorner" class="primary" disabled>Save</button>
-      <button id="cancelCorner" class="exit">Close</button>
-    </div>
-    <div class="corner-canvas-area">
-      <canvas id="cornerCanvas"></canvas>
-    </div>
-  </div>
-
   <div class="toast" id="toast"></div>
   <canvas id="canvas" hidden></canvas>
 
 <script src="/static/cv.js"></script>
 <script>
-// Read-position state. `corners` are the 4 clicked points (sorted server-side into
-// TL/TR/BR/BL); `prediction` is the last /api/live/predict response; `orient` rotates
-// the relabelling. The camera, corner-marking modal (CM), and grid math come from cv.js.
-let live = { corners: null, prediction: null, orient: 0 };
-let heat = { available: false, on: false, tinted: null };
+// Read-position state. There are no stored or hand-marked corners: a Read captures one
+// frame and the server auto-detects the board corners *and* the pieces on it. `prediction`
+// is the last /api/live/predict response; `orient` rotates the square relabelling. The
+// camera + grid math come from cv.js.
+let live = { prediction: null, orient: 0, available: false };
 
-function liveCornerKey() { return `cv_live_corners_${currentDeviceId()}`; }
-function applySavedCorners() {
-  const raw = localStorage.getItem(liveCornerKey());
-  if (raw) { try { live.corners = JSON.parse(raw); } catch { /* stale */ } }
-}
 window.onCameraStarted = updateButtons;
 async function onCameraChange(deviceId) {
-  CM.close();
   await startCamera(deviceId);
-  // New camera = new view: drop old corners, reuse this camera's saved ones if any.
-  live.corners = null; live.prediction = null; heat.tinted = null; autoPredictedOnce = false;
-  applySavedCorners();
+  live.prediction = null;  // new view: drop the old reading
   renderRead(); updateButtons();
 }
 
-/* ---------- corner marking (opens the shared modal) ---------- */
-function enterCornerMode() {
-  const v = $("video");
-  if (!stream || !v.videoWidth) return toast("Camera not ready");
-  const frozen = document.createElement("canvas");
-  frozen.width = v.videoWidth; frozen.height = v.videoHeight;
-  frozen.getContext("2d").drawImage(v, 0, 0);
-  CM.open(frozen, {
-    initialPts: Array.isArray(live.corners) ? live.corners : [],
-    onSave: async (_ordered, raw) => {
-      live.corners = raw;  // server sorts into TL/TR/BR/BL on predict
-      localStorage.setItem(liveCornerKey(), JSON.stringify(live.corners));
-      CM.close();
-      await readPosition();
-    },
-  });
-}
-
-/* ---------- corner-assist: probe + one-shot auto-predict from the live frame ---------- */
-async function checkCornerAssist() {
-  const info = await CM.checkAssist();
-  heat.available = !!info.heatmap;
-  $("heatLabel").hidden = !heat.available;
-}
-// When the camera is ready and no corners are saved yet, run the regressor on the
-// current frame and seed `live.corners` so the page lands "ready to Read".
-let autoPredictedOnce = false;
-async function autoPredictCorners() {
-  if (autoPredictedOnce || !CM.predictAvailable) return;
-  if (!stream || !$("video").videoWidth) return;
-  autoPredictedOnce = true;
-  try {
-    const blob = await captureBlob();
-    const body = new FormData();
-    body.append("image", blob, "frame.jpg");
-    const { corners: c } = await fetch("/api/corners/predict", { method: "POST", body }).then(j);
-    live.corners = [c.top_left, c.top_right, c.bottom_right, c.bottom_left];
-    localStorage.setItem(liveCornerKey(), JSON.stringify(live.corners));
-    toast("Corners predicted — press Read or Mark to adjust");
-    updateButtons();
-  } catch (e) {
-    autoPredictedOnce = false;  // let the user retry by reloading / changing camera
-    toast("Auto-predict failed: " + e.message);
-  }
-}
-
-/* ---------- live overlay (grid + piece base points) ---------- */
+/* ---------- live overlay (detected corners + grid + piece base points) ---------- */
 function drawOverlay() {
   const o = overlayCtx();
   if (!o || !live.prediction) return;
   drawGrid(o.ctx, live.prediction.lattice, o.r);
+  const c = live.prediction.corners;
+  ["top_left", "top_right", "bottom_right", "bottom_left"].forEach((k) => {
+    const [x, y] = toDisplay(c[k][0], c[k][1], o.r); drawDot(o.ctx, x, y, "#4f8cff", 7);
+  });
   live.prediction.pieces.forEach((p) => { const [x, y] = toDisplay(p.point[0], p.point[1], o.r); drawDot(o.ctx, x, y, p.color, 5); });
 }
-function overlayLoop() { try { drawOverlay(); drawHeat(); } catch { /* transient */ } requestAnimationFrame(overlayLoop); }
+function overlayLoop() { try { drawOverlay(); } catch { /* transient */ } requestAnimationFrame(overlayLoop); }
 
-/* ---------- additive heatmap overlay ---------- */
-// `heat.tinted` is the heatmap pre-baked into RGBA (alpha=intensity, RGB=accent tint),
-// so drawHeat just stretches it onto the canvas and natural alpha compositing puts the
-// peaks over the video with the dark floor staying invisible — no CSS blend modes.
-function drawHeat() {
-  const c = $("heatCanvas"), v = $("video");
-  c.width = c.clientWidth; c.height = c.clientHeight;
-  if (CM.active || !heat.on || !heat.tinted || !v.videoWidth) return;
-  const r = containRect(v.videoWidth, v.videoHeight, c.width, c.height);
-  const ctx = c.getContext("2d");
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";  // smooth peaks into visible blobs, not single px
-  ctx.drawImage(heat.tinted, r.offx, r.offy, v.videoWidth * r.scale, v.videoHeight * r.scale);
-}
-// Pull the latest heatmap PNG and bake it into a tinted RGBA canvas: peaks become
-// opaque yellow, the diffuse softmax floor goes transparent. Done once per refresh.
-async function refreshHeatmap() {
-  if (!heat.available || !heat.on) return;
-  try {
-    const blob = await captureBlob();
-    const body = new FormData();
-    body.append("image", blob, "frame.jpg");
-    const r = await fetch("/api/corners/heatmap", { method: "POST", body });
-    if (!r.ok) throw new Error((await r.json()).error || r.statusText);
-    const bmp = await createImageBitmap(await r.blob());
-    const off = document.createElement("canvas");
-    off.width = bmp.width; off.height = bmp.height;
-    const octx = off.getContext("2d");
-    octx.drawImage(bmp, 0, 0);
-    const id = octx.getImageData(0, 0, bmp.width, bmp.height);
-    // Histogram floor: drop the bottom 25% so the diffuse softmax background goes fully
-    // transparent; rescale the remainder so peaks still hit alpha=255.
-    const vals = [];
-    for (let i = 0; i < id.data.length; i += 4) vals.push(id.data[i]);
-    vals.sort((a, b) => a - b);
-    const floor = vals[Math.floor(vals.length * 0.25)];
-    const span = Math.max(1, 255 - floor);
-    for (let i = 0; i < id.data.length; i += 4) {
-      const g = id.data[i];
-      id.data[i] = 0xff; id.data[i + 1] = 0xd6; id.data[i + 2] = 0x2a;  // saturated yellow
-      id.data[i + 3] = Math.max(0, Math.min(255, ((g - floor) / span) * 255));
-    }
-    octx.putImageData(id, 0, 0);
-    heat.tinted = off;
-  } catch (e) { toast("Heatmap failed: " + e.message); }
-}
-async function onHeatToggle() {
-  heat.on = $("heatToggle").checked;
-  if (!heat.on) { const c = $("heatCanvas"); c.width = c.width; return; }  // clear immediately
-  if (!heat.tinted) await refreshHeatmap();
-}
-
-/* ---------- read position (live FEN) ---------- */
+/* ---------- read position (auto corners + pieces, one frame) ---------- */
 async function readPosition() {
   if (!stream) return toast("Camera not ready");
-  if (!live.corners) return toast("Mark the board corners first");
+  if (!live.available) return toast("Read-position mode is off (launch with --keypoint-ckpt and --corner-ckpt)");
   $("readBtn").disabled = true;
   try {
     const blob = await captureBlob();
     const body = new FormData();
     body.append("image", blob, "frame.jpg");
-    body.append("corners", JSON.stringify(live.corners));
     live.prediction = await fetch("/api/live/predict", { method: "POST", body }).then(j);
     renderRead();
     toast(`Read ${live.prediction.n_detected} piece(s) — rotate if the board reads wrong`);
-    if (heat.on) refreshHeatmap();  // a read is also a fresh frame
   } catch (e) { toast("Read failed: " + e.message); }
   updateButtons();
 }
@@ -306,7 +165,7 @@ function rotateRead() {
 }
 function renderRead() {
   const p = live.prediction, board = $("readBoard");
-  if (!p) { board.innerHTML = '<span class="read-board-empty">Mark the 4 board corners, then read the position.</span>'; return; }
+  if (!p) { board.innerHTML = '<span class="read-board-empty">Point the camera at the board and press Read.</span>'; return; }
   const name = ORIENTATIONS[live.orient], o = p.orientations[name];
   board.innerHTML = o.board_svg;
   $("fenInput").value = o.fen;
@@ -323,43 +182,33 @@ async function copyFen() {
 
 function updateButtons() {
   const camReady = !!(stream && $("video").videoWidth);
-  $("readBtn").disabled = !camReady || CM.active || !live.corners;
-  $("markBtn").disabled = !camReady;
-  $("markBtn").textContent = live.corners ? "Redo corners" : "Mark corners";
+  $("readBtn").disabled = !camReady || !live.available;
   $("readRotateBtn").disabled = !live.prediction;
-  $("cornerStatus").textContent = !camReady ? "camera not ready"
-    : !live.corners ? "corners not set"
-    : live.prediction ? "corners set" : "saved corners — press Read";
-  $("status").textContent = live.prediction
-    ? `${live.prediction.n_detected} pieces · ${ORIENTATIONS[live.orient]}`
-    : (live.corners ? "ready" : "—");
+  $("status").textContent = !live.available ? "read-position mode off"
+    : live.prediction ? `${live.prediction.n_detected} pieces · ${ORIENTATIONS[live.orient]}`
+    : (camReady ? "ready — press Read" : "—");
 }
 
 /* ---------- wiring ---------- */
 $("refreshCams").onclick = listCameras;
 $("cameraSelect").onchange = (e) => onCameraChange(e.target.value).catch((err) => toast(err.message));
 // videoWidth is 0 until the stream's metadata arrives, so re-run updateButtons on the
-// video's own ready events. Auto-predict needs a real frame, so wait for canplay.
+// video's own ready events.
 $("video").addEventListener("loadedmetadata", updateButtons);
-$("video").addEventListener("canplay", () => {
-  updateButtons();
-  if (!live.corners) autoPredictCorners().catch((e) => toast(e.message));
-});
-$("markBtn").onclick = enterCornerMode;
+$("video").addEventListener("canplay", updateButtons);
 $("readBtn").onclick = () => readPosition().catch((e) => toast(e.message));
 $("readRotateBtn").onclick = rotateRead;
 $("copyFenBtn").onclick = () => copyFen();
-$("heatToggle").onchange = () => onHeatToggle().catch((e) => toast(e.message));
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
-  if (e.repeat || CM.active) return;  // CM handles its own keys
+  if (e.repeat) return;
   if (e.code === "Space" || e.code === "Enter") { e.preventDefault(); readPosition().catch((err) => toast(err.message)); }
   else if (e.code === "ArrowRight" || e.code === "ArrowLeft") rotateRead();
 });
 
 (async function init() {
-  applySavedCorners();
-  await checkCornerAssist();
+  try { live.available = !!(await fetch("/api/live/available").then(j)).available; } catch { /* off */ }
+  if (!live.available) toast("Read-position mode is off — launch with --keypoint-ckpt and --corner-ckpt");
   await listCameras();
   renderRead();
   updateButtons();

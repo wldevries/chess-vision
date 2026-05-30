@@ -29,9 +29,11 @@ uv run python scripts/sync_captures.py down  # pull it back (size-based skip)
 uv run python scripts/sync_captures.py tasks # build Label Studio pre-annotations -> bucket tasks/
 uv run python scripts/sync_captures.py annotations  # pull LS export bucket -> data/captures/label-studio.json
 
-# Read-position (live FEN, Phase 4) mode in the web app: camera -> mark corners -> predicted FEN.
-# OFF unless a keypoint checkpoint is passed; toggle "Read position" in the header.
-uv run python -m chessvision.capture --keypoint-ckpt runs/keypoint_captures/best.pt
+# Read-position (live FEN, Phase 4) mode in the web app: camera -> Read -> predicted FEN.
+# A Read auto-detects the board corners then the pieces on the SAME frame, so it needs
+# BOTH checkpoints (--keypoint-ckpt for pieces, --corner-ckpt for corners); off otherwise.
+uv run python -m chessvision.capture \
+  --keypoint-ckpt runs/keypoint_captures/best.pt --corner-ckpt runs/corners/best.pt
 
 # Corner-label mode: dump phone photos in data/corners/inbox/, then label corners in-app.
 # Toggle "Label corners" in the header; --corner-ckpt also enables the "Predict" prefill.
@@ -39,13 +41,16 @@ uv run python -m chessvision.capture --corners-root data/corners --corner-ckpt r
 uv run python scripts/sync_captures.py up --local data/corners/store --prefix corners  # back up labels+images
 ```
 
-Read-position mode glue is `chessvision/inference.py` (`LivePredictor`/`build_prediction`)
-behind `POST /api/live/predict`. It detects pieces, maps each contact keypoint through the
-homography to a square, and emits one board FEN per orientation (R0..R270) in a single pass —
-the same detection relabelled four ways. **Board orientation is a deliberate manual toggle**
+Read-position mode glue is `chessvision/inference.py` (`LivePredictor` + `CornerPredictor`,
+`build_prediction`) behind `POST /api/live/predict`. A single Read uploads one frame; the
+server **auto-detects the 4 board corners** with the corner regressor, then detects pieces on
+the *same* frame, maps each contact keypoint through the homography to a square, and emits one
+board FEN per orientation (R0..R270) in a single pass — the same detection relabelled four
+ways. There is **no manual corner marking** in the live view (and no stored corners): the board
+is read off the photo every time. **Board orientation is still a deliberate manual toggle**
 (which physical corner is a8 is NOT recoverable from geometry; all four rotations are valid),
-so the UI suggests one and the user rotates to the reading that matches reality. Clicked
-corners are sorted into TL/TR/BR/BL by `geometry.order_corners` (click order doesn't matter).
+so the UI suggests one and the user rotates to the reading that matches reality. Detected
+corners are sorted into TL/TR/BR/BL by `geometry.order_corners`.
 
 `tasks` reads local captures (marked corners + FEN-projected piece estimates) and
 writes one Label Studio task-JSON per frame to the same bucket under `tasks/` (not

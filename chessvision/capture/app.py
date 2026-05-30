@@ -426,8 +426,8 @@ def create_app(
 
     @app.get("/live", response_class=HTMLResponse)
     def live_page() -> str:
-        """Standalone Read-position view: camera -> mark corners -> predicted FEN, with
-        an optional additive heatmap overlay of the 81-point lattice corner regressor."""
+        """Standalone Read-position view: camera -> Read (auto-detects corners then
+        pieces on the same frame) -> predicted FEN."""
         return (STATIC_DIR / "live.html").read_text(encoding="utf-8")
 
     @app.get("/api/games")
@@ -697,36 +697,40 @@ def create_app(
 
     @app.get("/api/live/available")
     def live_available() -> dict:
-        """Whether Read-position mode is wired (a checkpoint was provided at launch)."""
-        return {"available": predictor is not None}
+        """Whether Read-position mode is wired. It needs *both* checkpoints: the corner
+        regressor (auto-detects the board) and the keypoint detector (the pieces)."""
+        return {"available": predictor is not None and corner_predictor is not None}
 
     @app.post("/api/live/predict")
-    async def live_predict(image: UploadFile, corners: str = Form(...)) -> dict:
-        """Read an unknown position: detect pieces, map contacts -> squares -> FEN.
+    async def live_predict(image: UploadFile) -> dict:
+        """Read an unknown position end-to-end from a single frame.
 
-        `corners` is a JSON array of four [x, y] image points in any order (sorted
-        server-side). Returns one board SVG + FEN per orientation (R0..R270) so the
-        client can let the user rotate to the reading that matches reality, plus the
-        grid lattice and per-piece contact points for the live overlay.
+        Auto-detects the 4 board corners on the uploaded frame, then detects pieces on
+        the *same* frame and maps each contact point -> square -> FEN. No corners come
+        from the client: both the board and the pieces are read off this one photo.
+        Returns one board SVG + FEN per orientation (R0..R270) so the client can let the
+        user rotate to the reading that matches reality, plus the detected corners, grid
+        lattice, and per-piece contact points for the live overlay.
         """
-        if predictor is None:
-            raise HTTPException(503, "Read-position mode is off (launch with --keypoint-ckpt)")
+        if predictor is None or corner_predictor is None:
+            raise HTTPException(
+                503,
+                "Read-position mode is off (launch with --keypoint-ckpt and --corner-ckpt)",
+            )
         data = await image.read()
         if not data:
             raise HTTPException(400, "empty image upload")
-        try:
-            pts = json.loads(corners)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(400, f"corners must be JSON: {exc}") from exc
-        if not isinstance(pts, list) or len(pts) != 4:
-            raise HTTPException(400, "corners must be a JSON array of four [x, y] points")
 
         bgr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
         if bgr is None:
             raise HTTPException(400, "could not decode image")
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         try:
-            result = predictor.predict(rgb, pts)
+            corners = corner_predictor.predict(rgb)
+        except Exception as exc:  # corner model failure -> 500 with the reason
+            raise HTTPException(500, f"corner prediction failed: {exc}") from exc
+        try:
+            result = predictor.predict(rgb, corners)
         except Exception as exc:  # model / geometry failure -> 500 with the reason
             raise HTTPException(500, f"prediction failed: {exc}") from exc
 
@@ -760,17 +764,8 @@ def create_app(
 
     @app.get("/api/corners/available")
     def corners_available() -> dict:
-        """Whether corner-assist is wired (a corner checkpoint was provided at launch).
-
-        `heatmap` is True only for a lattice checkpoint — the additive 81-point overlay
-        is only meaningful for that variant; a 4-corner model would just emit 4 blobs.
-        """
-        if corner_predictor is None:
-            return {"available": False, "heatmap": False}
-        # Read the lazy flag without forcing a load: we only know once the model is loaded,
-        # so fall back to False here and let the live page re-probe after a real call.
-        is_lattice = bool(getattr(corner_predictor, "_is_lattice", False))
-        return {"available": True, "heatmap": is_lattice}
+        """Whether corner-assist is wired (a corner checkpoint was provided at launch)."""
+        return {"available": corner_predictor is not None}
 
     @app.post("/api/corners/predict")
     async def corners_predict(image: UploadFile) -> dict:
@@ -793,32 +788,6 @@ def create_app(
         except Exception as exc:  # model failure -> 500 with the reason
             raise HTTPException(500, f"corner prediction failed: {exc}") from exc
         return {"corners": corners}
-
-    @app.post("/api/corners/heatmap")
-    async def corners_heatmap(image: UploadFile) -> Response:
-        """Summed lattice heatmap as a grayscale PNG, for the live-view overlay.
-
-        Each of the lattice model's 81 channels is a per-point spatial softmax; summing
-        them gives a single map whose peaks lie on the predicted grid intersections. The
-        client stretches this PNG over the frame with additive blending so the user can
-        see the model's confidence (and any drift / dropouts) across the board. Only
-        meaningful for a lattice checkpoint; falls back to the 4-corner blobs otherwise.
-        """
-        if corner_predictor is None:
-            raise HTTPException(503, "Corner-assist is off (launch with --corner-ckpt)")
-        data = await image.read()
-        if not data:
-            raise HTTPException(400, "empty image upload")
-        bgr = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if bgr is None:
-            raise HTTPException(400, "could not decode image")
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        try:
-            heat = corner_predictor.heatmap(rgb)
-        except Exception as exc:
-            raise HTTPException(500, f"heatmap failed: {exc}") from exc
-        png = cv2.imencode(".png", (heat * 255.0).clip(0, 255).astype(np.uint8))[1].tobytes()
-        return Response(content=png, media_type="image/png")
 
     @app.get("/api/corners-label/available")
     def corner_label_available() -> dict:

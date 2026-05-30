@@ -274,14 +274,3 @@ class CornerPredictor:
     def is_lattice(self) -> bool:
         self._ensure_loaded()
         return self._is_lattice
-
-    def heatmap(self, rgb: np.ndarray) -> np.ndarray:
-        """Summed (additive) per-channel softmax heatmap, (H, W) float32 in [0, 1].
-
-        Only meaningful for a lattice checkpoint (each of its 81 channels localizes a
-        grid intersection); for a 4-corner model the sum is just the four corner blobs.
-        """
-        self._ensure_loaded()
-        from chessvision.corner_regressor import summed_heatmap
-
-        return summed_heatmap(self._model, np.ascontiguousarray(rgb), device=self._device)

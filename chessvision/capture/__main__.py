@@ -61,15 +61,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--keypoint-ckpt",
         type=Path,
         default=None,
-        help="enable Read-position (live FEN) mode with this keypoint checkpoint "
-        "(e.g. runs/keypoint_captures/best.pt)",
+        help="piece keypoint checkpoint for Read-position (live FEN) mode "
+        "(e.g. runs/keypoint_captures/best.pt); needs --corner-ckpt too, since a Read "
+        "auto-detects the board corners before the pieces",
     )
     p.add_argument(
         "--corner-ckpt",
         type=Path,
         default=None,
-        help="enable corner-assist (a 'Predict' button pre-fills the corner-marking "
-        "handles) with this corner-regressor checkpoint (e.g. runs/corners/best.pt)",
+        help="corner-regressor checkpoint (e.g. runs/corners/best.pt): drives corner-assist "
+        "(the 'Predict' button pre-fills the corner-marking handles) and the automatic "
+        "corner detection in Read-position mode",
     )
     p.add_argument(
         "--corners-root",
@@ -119,8 +121,15 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Open http://{args.host}:{args.port} on the tablet, then pick a game and start snapping."
     )
-    if args.keypoint_ckpt:
-        print(f"Read-position mode ON · checkpoint {args.keypoint_ckpt}")
+    if args.keypoint_ckpt and args.corner_ckpt:
+        print(
+            f"Read-position mode ON · pieces {args.keypoint_ckpt} · corners {args.corner_ckpt}"
+        )
+    elif args.keypoint_ckpt:
+        print(
+            "Read-position mode OFF: --keypoint-ckpt also needs --corner-ckpt "
+            "(corners are auto-detected per read)"
+        )
     if args.corner_ckpt:
         print(f"Corner-assist ON · checkpoint {args.corner_ckpt}")
     if args.corners_root:

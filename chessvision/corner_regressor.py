@@ -282,37 +282,6 @@ def homography_from_lattice(points_px: np.ndarray, conf: np.ndarray | None = Non
     return (h / h[2, 2]).astype(np.float32)
 
 
-def summed_heatmap(
-    model: CornerHeatmapNet,
-    rgb: np.ndarray,
-    device: str | torch.device = "cpu",
-    image_size: int | None = None,
-) -> np.ndarray:
-    """Additive heatmap for the whole lattice, with per-channel peak normalization.
-
-    Each of the model's K keypoint channels is a per-point spatial softmax. The
-    well-trained corner channels are *much* sharper than the often-occluded interior
-    intersections, so a plain channel-sum is dominated by the 4 corners and the
-    other 77 points vanish into a wash. We rescale each channel by its own peak
-    first so every point contributes a unit-height blob, then sum and normalize.
-    Returned as a (H, W) float32 in [0, 1].
-    """
-    size = image_size or getattr(model, "image_size", DEFAULT_IMAGE_SIZE)
-    inp = cv2.resize(rgb, (size, size), interpolation=cv2.INTER_AREA)
-    tensor = torch.from_numpy(np.ascontiguousarray(inp)).permute(2, 0, 1).float().div_(255.0)
-    with torch.no_grad():
-        h = model.heatmaps(tensor.unsqueeze(0).to(device))  # (1, K, H, W)
-        _, k, hh, ww = h.shape
-        prob = h.reshape(1, k, hh * ww).softmax(dim=-1).reshape(1, k, hh, ww)
-        peaks = prob.amax(dim=(-1, -2), keepdim=True).clamp(min=1e-8)
-        summed = (prob / peaks).sum(dim=1)[0]  # (H, W), each channel contributes max=1
-    arr = summed.cpu().numpy().astype(np.float32)
-    m = float(arr.max())
-    if m > 0:
-        arr = arr / m
-    return arr
-
-
 def corners_from_lattice(
     model: CornerHeatmapNet,
     rgb: np.ndarray,

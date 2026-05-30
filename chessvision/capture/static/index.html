@@ -50,7 +50,7 @@ const TOOLS = [
   { href: "/corners", ico: "▦", name: "Label corners", desc: "Mark board corners on staged phone photos.",
     check: () => avail("/api/corners-label/available"), need: "--corners-root" },
   { href: "/live", ico: "👁", name: "Read position", desc: "Read an unknown position from the camera to FEN.",
-    check: () => avail("/api/live/available"), need: "--keypoint-ckpt" },
+    check: () => avail("/api/live/available"), need: "--keypoint-ckpt + --corner-ckpt" },
   { href: "/sessions", ico: "🏷", name: "Edit sessions", desc: "Tag past sessions with set / board / camera / surface." },
 ];
 
