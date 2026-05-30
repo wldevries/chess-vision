@@ -28,7 +28,8 @@ import torch
 
 from chessvision.capture_eval import confusion_captures, evaluate_captures
 from chessvision.corner_regressor import load_corner_regressor
-from chessvision.data.positions import position_samples_as_captures
+from chessvision.data.corner_capture import CornerStore
+from chessvision.data.positions import store_label_to_capture
 from chessvision.keypoint_detector import load_keypoint_detector
 from scripts.eval_end_to_end_captures import evaluate_end_to_end
 from scripts.eval_per_board_captures import _round, print_confusion
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     add = p.add_argument
-    add("--corners-root", type=Path, default=Path("data/corners"))
+    add("--corners-root", type=Path, default=Path("data"))
     add("--keypoint-ckpt", type=Path, default=Path("runs/keypoint_captures/best.pt"))
     add("--corner-ckpt", type=Path, default=Path("runs/corners/best.pt"))
     add("--only-board", default=None, help="restrict to one board id (e.g. dennis-bord)")
@@ -50,19 +51,23 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     device = torch.device(args.device)
-    samples = position_samples_as_captures(args.corners_root)
-    if not samples:
+    # Group by the record's board (from the store), then convert to CaptureSamples carrying
+    # their real session. (The unified store keys sessions on the real capture session, not
+    # pos-<board>, so the board must come from the record, not the session.)
+    store = CornerStore(args.corners_root)
+    labels = store.position_samples()
+    if not labels:
         raise SystemExit(f"no position-labelled samples under {args.corners_root}")
 
     by_board: dict[str, list] = defaultdict(list)
-    for s in samples:
-        board = s.session.removeprefix("pos-")  # session is pos-<board>
+    for lb in labels:
+        board = lb.board or "(untagged)"
         if args.only_board and board != args.only_board:
             continue
-        by_board[board].append(s)
+        by_board[board].append(store_label_to_capture(lb, store))
 
     print(f"source: {args.corners_root} positions  (all frames are out-of-sample unless the")
-    print("        board was folded into keypoint training via --positions-root)")
+    print("        board was folded into keypoint training)")
     for b, grp in sorted(by_board.items()):
         print(f"  {b:16s}: {len(grp)} frames")
 

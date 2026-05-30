@@ -31,7 +31,7 @@ from chessvision.data.corner_capture import (
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--corners-root", default="data/corners")
+    p.add_argument("--corners-root", default="data")
     p.add_argument("--gap-minutes", type=float, default=20.0)
     p.add_argument("--dry-run", action="store_true", help="report only; do not write")
     args = p.parse_args()

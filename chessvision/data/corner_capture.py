@@ -194,8 +194,10 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 def _task_id(label_id: str) -> int:
-    """Deterministic int id for pose-clustering order (stable across re-labels)."""
-    return int(label_id[:8], 16)
+    """Deterministic int derived from the record id (a source-relative path) for pose-cluster
+    ordering + the tensor `image_id`. Not stored -- computed on read. (Was an int parse of a
+    hex sha1 id; now the id is a path, so hash it.)"""
+    return int(hashlib.sha1(label_id.encode("utf-8")).hexdigest()[:8], 16)
 
 
 # --------------------------------------------------------------------------- #
@@ -209,10 +211,10 @@ class CornerLabel:
     the shared pose-clustering helpers (`_cluster_by_corners` reads `corners`/`width`/
     `height`/`task_id`)."""
 
-    id: str
-    task_id: int
-    src: str  # inbox-relative source path (forward slashes)
-    image: str  # store-relative normalized JPEG, e.g. "images/<id>.jpg"
+    id: str  # the source-relative path, e.g. "inbox/IMG_x.jpg" or "<session>/<file>.jpg"
+    task_id: int  # derived from id (not stored); pose-cluster order + tensor image_id
+    src: str  # == id: original at source/<src>
+    image: str  # == id: normalized JPEG at store/<image>
     width: int
     height: int
     corners: dict[str, tuple[float, float]]  # snake_case key -> (x, y) in the normalized frame
@@ -319,15 +321,19 @@ class InboxPhoto:
 
 
 class CornerStore:
-    """Read/write access to a `data/corners` tree: list the inbox, normalize-and-save a
-    label, and enumerate labelled samples for training."""
+    """Read/write access to the flat `data/` tree: normalized images under ``store/`` (keyed
+    by their source-relative path), the ``labels.jsonl`` index at the root, and the originals
+    under ``source/`` (``source/inbox/`` for phone dumps, ``source/<session>/`` for captures).
+    ``store/<relpath>`` and ``source/<relpath>`` are the SAME relative path -> provenance is a
+    pure identity (the record id == image == src == that relpath)."""
 
     def __init__(self, root: str | Path):
         self.root = Path(root)
-        self.inbox = self.root / "inbox"
-        self.store = self.root / "store"
-        self.images_dir = self.store / "images"
-        self.labels_path = self.store / "labels.jsonl"
+        self.store = self.root / "store"  # normalized images at store/<relpath>
+        self.images_dir = self.store  # back-compat alias; images live directly under store/
+        self.labels_path = self.root / "labels.jsonl"
+        self.source = self.root / "source"  # originals: source/<relpath>
+        self.inbox = self.source / "inbox"  # phone dumps for labelling
 
     # ---- labels.jsonl -------------------------------------------------------
 
@@ -345,7 +351,7 @@ class CornerStore:
         return rows
 
     def _write_labels(self, rows: dict[str, dict]) -> None:
-        self.store.mkdir(parents=True, exist_ok=True)
+        self.labels_path.parent.mkdir(parents=True, exist_ok=True)
         ordered = sorted(rows.values(), key=lambda r: r["id"])
         body = "\n".join(json.dumps(r) for r in ordered)
         _atomic_write_text(self.labels_path, body + ("\n" if body else ""))
@@ -377,13 +383,13 @@ class CornerStore:
         """Every decodable inbox photo, date-ordered, with labelled state. The `group`
         is the immediate parent folder so the UI can show a hierarchical, date-named
         listing. Sorted by (date, src) so a date-named dump reads chronologically."""
-        labels = self.load_labels()
-        by_src = {r["src"]: r for r in labels.values()}
+        labels = self.load_labels()  # keyed by id == source-relative path
         photos: list[InboxPhoto] = []
         for path in self._iter_inbox_files():
             src = path.relative_to(self.inbox).as_posix()
+            relpath = f"inbox/{src}"  # the record id for an inbox photo
             parent = path.parent.relative_to(self.inbox).as_posix()
-            row = by_src.get(src)
+            row = labels.get(relpath)
             corners = None
             pieces = (row or {}).get("pieces") or None
             if row is not None:
@@ -391,7 +397,7 @@ class CornerStore:
                 corners = [[float(c[k][0]), float(c[k][1])] for k in CORNER_ORDER]
             photos.append(
                 InboxPhoto(
-                    id=_stable_id(src),
+                    id=relpath,
                     src=src,
                     group="" if parent == "." else parent,
                     date=self._photo_date(path),
@@ -461,10 +467,13 @@ class CornerStore:
         raw = path.read_bytes()
         rgb, (w, h) = normalize_image(raw)
         exif_meta = extract_exif_meta(raw)  # publish-safe whitelist; GPS/serials never read
-        label_id = _stable_id(src)
-        image_rel = f"images/{label_id}.jpg"
-        self.images_dir.mkdir(parents=True, exist_ok=True)
-        (self.store / image_rel).write_bytes(encode_jpeg(rgb))
+        # id == image == src == the source-relative path. An inbox photo lives at
+        # source/inbox/<src>, so its relpath is "inbox/<src>"; the normalized JPEG mirrors it
+        # at store/<relpath>.
+        relpath = f"inbox/{src}"
+        dest = self.store / relpath
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(encode_jpeg(rgb))
 
         pts = list(corners.values()) if isinstance(corners, dict) else list(corners)
         ordered = order_corners(pts)  # {top_left, top_right, bottom_right, bottom_left}
@@ -472,10 +481,10 @@ class CornerStore:
             (str(p["label"]), float(p["x"]), float(p["y"])) for p in (pieces or [])
         )
         label = CornerLabel(
-            id=label_id,
-            task_id=_task_id(label_id),
-            src=src,
-            image=image_rel,
+            id=relpath,
+            task_id=_task_id(relpath),
+            src=relpath,
+            image=relpath,
             width=w,
             height=h,
             corners={k: (float(ordered[k][0]), float(ordered[k][1])) for k in CORNER_ORDER},

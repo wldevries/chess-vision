@@ -76,10 +76,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--corners-root",
         type=Path,
-        default=Path("data/corners"),
-        help="corner-label mode root: phone photos staged in <root>/inbox/ are labelled in "
-        "the app and written as a standalone corner dataset to <root>/store/. On by default; "
-        "pass --no-corners-root to disable.",
+        default=Path("data"),
+        help="unified store root (flat layout): phone photos staged in <root>/source/inbox/ are "
+        "labelled in the app and written as normalized images to <root>/store/ with the index at "
+        "<root>/labels.jsonl. On by default; pass --no-corners-root to disable.",
     )
     p.add_argument(
         "--no-corners-root",

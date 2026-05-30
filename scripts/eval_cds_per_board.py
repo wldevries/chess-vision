@@ -42,7 +42,7 @@ def eval_samples(model, samples, store, cfg, device):
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", default="runs/corners/best.pt")
-    p.add_argument("--corners-root", default="data/corners")
+    p.add_argument("--corners-root", default="data")
     p.add_argument("--dedup-thr", type=float, default=0.02)
     p.add_argument("--max-per-pose", type=int, default=2)
     p.add_argument("--val-frac", type=float, default=0.25)
@@ -80,7 +80,11 @@ def main() -> int:
     boards_with_both = {
         k.rsplit(" [", 1)[0] for k in by_board_orient
     }
-    mixed = {b for b in boards_with_both if sum(b == kk.rsplit(" [", 1)[0] for kk in by_board_orient) > 1}
+    mixed = {
+        b
+        for b in boards_with_both
+        if sum(b == kk.rsplit(" [", 1)[0] for kk in by_board_orient) > 1
+    }
     if mixed:
         print("  -- orientation split (boards with both) --")
         for key in sorted(by_board_orient):

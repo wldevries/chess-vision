@@ -50,7 +50,7 @@ def eval_samples(model, samples, store, cfg, device, lattice: bool):
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", default="runs/corners/best.pt")
-    p.add_argument("--corners-root", default="data/corners")
+    p.add_argument("--corners-root", default="data")
     p.add_argument("--board", default=None, help="restrict to one board tag (default: all)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -74,7 +74,7 @@ def main() -> int:
         by_board[board].append(s)
 
     print(f"ckpt={args.ckpt}  pred_points={n_pts} ({'lattice' if lattice else '4-corner'})")
-    print(f"metric = mean per-point L2 error as fraction of image size (lower better)\n")
+    print("metric = mean per-point L2 error as fraction of image size (lower better)\n")
     for board in sorted(by_board):
         # representative long side for a rough px figure
         longs = [max(s.width, s.height) for s in by_board[board]]

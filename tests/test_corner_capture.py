@@ -71,7 +71,9 @@ def test_save_label_writes_store_image_and_row(tmp_path: Path) -> None:
     assert label.corners["bottom_right"] == (100.0, 65.0)
     assert label.board == "staunton-56mm"
     rows = store.load_labels()
-    assert len(rows) == 1 and next(iter(rows.values()))["src"] == "2026-05-27/IMG_1.jpg"
+    # id == src == image == the source-relative path ("inbox/" + the inbox-relative path).
+    assert len(rows) == 1 and next(iter(rows.values()))["src"] == "inbox/2026-05-27/IMG_1.jpg"
+    assert label.id == label.image == label.src == "inbox/2026-05-27/IMG_1.jpg"
 
 
 def test_resaving_same_src_overwrites_in_place(tmp_path: Path) -> None:
@@ -175,8 +177,8 @@ def test_corner_label_inbox_image_and_save(corner_client: TestClient, tmp_path: 
     assert resp.status_code == 200 and resp.json()["labeled"] is True
     # Now flagged labelled in the listing.
     assert corner_client.get("/api/corners-label/inbox").json()[0]["labeled"] is True
-    # And persisted to disk under the corners root.
-    labels = (tmp_path / "corners" / "store" / "labels.jsonl").read_text(encoding="utf-8").strip()
+    # And persisted to disk under the corners root (labels.jsonl now at the root, flat layout).
+    labels = (tmp_path / "corners" / "labels.jsonl").read_text(encoding="utf-8").strip()
     assert json.loads(labels)["board"] == "staunton-56mm"
 
 

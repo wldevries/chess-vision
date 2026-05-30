@@ -63,14 +63,15 @@ def eval_image(model, rgb, gt_corners, device, predict):
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", default="runs/corners/best.pt")
-    p.add_argument("--corners-root", default="data/corners")
+    p.add_argument("--corners-root", default="data")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--dedup-thr", type=float, default=0.02)
     p.add_argument("--max-per-pose", type=int, default=2)
     p.add_argument("--val-frac", type=float, default=0.25)
     p.add_argument("--lattice", action="store_true", help="checkpoint is an 81-point lattice model")
-    p.add_argument("--no-conf", action="store_true", help="lattice: unweighted H-fit (ignore confidence)")
-    p.add_argument("--all-frames", action="store_true", help="score every labelled frame, not just the held-out pose split (use for a board the ckpt never trained on)")
+    p.add_argument("--no-conf", action="store_true", help="lattice: unweighted H-fit (ignore conf)")
+    p.add_argument("--all-frames", action="store_true", help="score every labelled frame, not just "
+                   "the held-out pose split (use for a board the ckpt never trained on)")
     p.add_argument("--board", default=None, help="restrict to one board tag")
     args = p.parse_args()
 
@@ -108,9 +109,13 @@ def main() -> int:
             r["ok"].append(ok)
 
     print(f"ckpt={args.ckpt}  held-out images={len(heldout)}")
-    print(f"{'board':24s} {'n':>3} {'square-acc':>10} {'cell-disp':>10} {'worst-disp':>10} {'board-ok':>9}")
+    hdr = f"{'board':24s} {'n':>3} {'square-acc':>10} {'cell-disp':>10} {'worst-disp':>10}"
+    print(f"{hdr} {'board-ok':>9}")
     # boards first (no leading spaces), then the orientation sub-rows
-    for key in sorted(rows, key=lambda k: (k.strip().startswith(("staunton", "rimless", "cheap")) and k.startswith("  "), k)):
+    def _order(k: str):
+        return (k.strip().startswith(("staunton", "rimless", "cheap")) and k.startswith("  "), k)
+
+    for key in sorted(rows, key=_order):
         r = rows[key]
         n = len(r["acc"])
         print(
