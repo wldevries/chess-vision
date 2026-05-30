@@ -323,6 +323,10 @@ def create_app(
     games_by_id = {g.game_id: g for g in games}
     sessions: dict[str, Session] = {}
 
+    # sets.json/boards.json (the Set/Board dropdowns + mm reference) live at the unified
+    # store root in the flat layout; fall back to out_root only when no store is wired.
+    meta_root = Path(corners_root) if corners_root is not None else out_root
+
     # Corner-label mode: an import-and-label flow over phone photos staged in a
     # `data/corners/inbox/` tree, writing a standalone corner dataset (no FEN / Label
     # Studio). Off unless a corners root is provided; a pre-built store can be injected
@@ -525,7 +529,7 @@ def create_app(
     @app.get("/api/meta")
     def meta() -> dict:
         """Piece-set and board ids for the capture UI's Set/Board dropdowns."""
-        return _meta_options(out_root)
+        return _meta_options(meta_root)
 
     def _add_meta_entry(name: str, kind: str, item_id: str, entry: dict) -> dict:
         """Append a new entry to sets.json/boards.json, preserving existing content
@@ -534,7 +538,7 @@ def create_app(
         item_id = (item_id or "").strip()
         if not item_id or item_id.startswith("_"):
             raise HTTPException(400, "id must be non-empty and must not start with '_'")
-        path = out_root / name
+        path = meta_root / name
         data: dict = {}
         if path.exists():
             try:
@@ -545,7 +549,7 @@ def create_app(
             raise HTTPException(409, f"{kind} '{item_id}' already exists")
         data[item_id] = entry
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        return _meta_options(out_root)
+        return _meta_options(meta_root)
 
     @app.post("/api/meta/board")
     def add_board(body: NewBoardIn) -> dict:
