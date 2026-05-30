@@ -30,12 +30,18 @@ NUM_KEYPOINTS = 1  # the single board-contact point per piece
 
 
 def build_keypoint_detector(
-    num_classes: int = NUM_CLASSES, num_keypoints: int = NUM_KEYPOINTS
+    num_classes: int = NUM_CLASSES,
+    num_keypoints: int = NUM_KEYPOINTS,
+    pretrained: bool = False,
 ) -> torch.nn.Module:
     """A Faster R-CNN (v2) trunk with a keypoint branch grafted onto `roi_heads`.
 
-    `pretrained=False` because weights come from the trained detector checkpoint
-    (see `graft_from_detector_checkpoint`); only the keypoint branch is new.
+    `pretrained=False` (the default) leaves the trunk random because weights normally
+    come from the trained detector checkpoint (see `graft_from_detector_checkpoint`);
+    only the keypoint branch is new. Pass `pretrained=True` to start the trunk from the
+    **COCO source weights** instead (backbone+FPN+RPN+box-head features pretrained, the
+    12-class box predictor reinitialized) -- used by the joint ChessReD+store train, where
+    baking in our own ChessReD checkpoint would double-count ChessReD in the init.
     """
     from torchvision.models.detection.keypoint_rcnn import (
         KeypointRCNNHeads,
@@ -43,7 +49,7 @@ def build_keypoint_detector(
     )
     from torchvision.ops import MultiScaleRoIAlign
 
-    model = build_detector(num_classes=num_classes, pretrained=False)
+    model = build_detector(num_classes=num_classes, pretrained=pretrained)
     out_channels = model.backbone.out_channels  # 256 for ResNet50-FPN
     model.roi_heads.keypoint_roi_pool = MultiScaleRoIAlign(
         featmap_names=["0", "1", "2", "3"], output_size=14, sampling_ratio=2
