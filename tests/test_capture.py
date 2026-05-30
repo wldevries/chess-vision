@@ -155,27 +155,16 @@ def test_finish_requires_a_capture(client: TestClient) -> None:
     assert resp.status_code == 400
 
 
-def test_finish_publishes_the_session(client: TestClient, monkeypatch) -> None:
-    # Storage config present (no real network — publish_session is stubbed).
-    monkeypatch.setenv("MINIO_ENDPOINT_URL", "http://fake:9000")
-    for var in ("MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET"):
-        monkeypatch.setenv(var, "x")
-    calls: list = []
-    monkeypatch.setattr(
-        "chessvision.data.publish.publish_session",
-        lambda *a, **k: calls.append((a, k)) or {"uploaded": 2, "skipped": 0, "tasks": 1},
-    )
-
+def test_finish_finalizes_locally(client: TestClient) -> None:
+    # The Label Studio publish step is retired; finish now just reports the local count.
     game_id = client.get("/api/games").json()[0]["game_id"]
     sid = client.post("/api/session", data={"game_id": game_id}).json()["session_id"]
     client.post(
         f"/api/session/{sid}/snap", files={"image": ("f.jpg", b"\xff\xd8\xff\xd9", "image/jpeg")}
     )
-
     resp = client.post(f"/api/session/{sid}/finish")
     assert resp.status_code == 200
-    assert resp.json() == {"session_id": sid, "uploaded": 2, "skipped": 0, "tasks": 1}
-    assert len(calls) == 1  # publish_session was invoked once
+    assert resp.json() == {"session_id": sid, "captures": 1}
 
 
 def test_api_lists_games_and_runs_a_snap_cycle(client: TestClient, tmp_path: Path) -> None:
