@@ -83,6 +83,99 @@ def encode_jpeg(rgb: np.ndarray, quality: int = 92) -> bytes:
     return buf.tobytes()
 
 
+# --------------------------------------------------------------------------- #
+# EXIF metadata extraction (publish-safe whitelist)
+# --------------------------------------------------------------------------- #
+
+# Per-device lens map: slugged (make, model) -> {(focal_mm, f_number): lens name}. Phones
+# like the Fairphone 5 write no LensModel, so the focal length + aperture are the only way
+# to tell which physical camera shot a photo. Unmapped combos fall back to a raw
+# "<focal>mm-f<fnum>" tag (nothing lost); add rows here as new lenses/phones show up.
+LENS_NAMES: dict[tuple[str, str], dict[tuple[float, float], str]] = {
+    ("fairphone", "fp5"): {
+        (5.56, 1.88): "main",  # FP5 rear wide; ultrawide has a shorter focal -> distinct tag
+    },
+}
+
+
+def _slug(text: str) -> str:
+    """Lowercase alphanumeric slug (non-alnum -> single hyphen, trimmed)."""
+    out, prev_dash = [], False
+    for ch in text.lower():
+        if ch.isalnum():
+            out.append(ch)
+            prev_dash = False
+        elif not prev_dash:
+            out.append("-")
+            prev_dash = True
+    return "".join(out).strip("-")
+
+
+def _device_id(make: str, model: str, focal_mm: float | None, f_number: float | None) -> str:
+    """A stable, lens-aware device slug from EXIF camera fields (e.g. "fairphone-fp5-main"),
+    or "" when there's no make/model. Falls back to a raw focal/aperture lens tag for an
+    unmapped lens so the camera is always distinguishable."""
+    mk, md = _slug(make), _slug(model)
+    base = "-".join(p for p in (mk, md) if p)
+    if not base:
+        return ""
+    lens = ""
+    table = LENS_NAMES.get((mk, md))
+    if table is not None and focal_mm is not None and f_number is not None:
+        lens = table.get((focal_mm, f_number), "")
+    if not lens and focal_mm is not None and f_number is not None:
+        lens = f"{focal_mm:g}mm-f{f_number:g}"
+    return f"{base}-{lens}" if lens else base
+
+
+def extract_exif_meta(data: bytes) -> dict:
+    """Whitelisted, **publish-safe** EXIF for a label row.
+
+    Returns ONLY non-sensitive fields: ``captured_at`` (ISO seconds, the photo's capture
+    time), ``device`` (lens-aware camera slug, e.g. ``"fairphone-fp5-main"``), and the
+    provenance ``make``/``model``/``focal_mm``/``f_number`` used to derive it. **GPS
+    (location) and serial/owner tags are never read**, so nothing location- or
+    owner-identifying can leak into the dataset -- the stored JPEG is already EXIF-free, so
+    the published artifact is those images plus this whitelist. Missing fields are omitted;
+    returns ``{}`` when the image has no usable EXIF.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            exif = im.getexif()
+            sub = exif.get_ifd(0x8769)  # Exif sub-IFD: focal length, aperture, capture time
+    except (OSError, ValueError, SyntaxError):
+        return {}
+
+    out: dict = {}
+    raw_dt = sub.get(36867) or exif.get(306)  # DateTimeOriginal, then DateTime
+    if raw_dt:
+        try:
+            out["captured_at"] = datetime.strptime(
+                str(raw_dt), "%Y:%m:%d %H:%M:%S"
+            ).isoformat(timespec="seconds")
+        except ValueError:
+            pass
+
+    make = str(exif.get(271, "") or "").strip()  # Make
+    model = str(exif.get(272, "") or "").strip()  # Model
+    focal = sub.get(37386)  # FocalLength (mm)
+    f_number = sub.get(33437)  # FNumber
+    focal_mm = round(float(focal), 2) if focal is not None else None
+    f_num = round(float(f_number), 2) if f_number is not None else None
+    if make:
+        out["make"] = make
+    if model:
+        out["model"] = model
+    if focal_mm is not None:
+        out["focal_mm"] = focal_mm
+    if f_num is not None:
+        out["f_number"] = f_num
+    device = _device_id(make, model, focal_mm, f_num)
+    if device:
+        out["device"] = device
+    return out
+
+
 def _stable_id(src: str) -> str:
     """A stable, filesystem-safe id for an inbox-relative source path."""
     return hashlib.sha1(src.encode("utf-8")).hexdigest()[:16]
@@ -126,9 +219,11 @@ class CornerLabel:
     board: str = ""  # boards.json key; "" -> untagged
     piece_set: str = ""  # sets.json key (the physical piece set); "" -> untagged. Stored as
     # "set" in the row to mirror sessions.json; matters for the *piece* (position) labels.
-    device: str = ""
+    device: str = ""  # camera slug; auto-derived from EXIF (lens-aware) when present
     surface: str = ""
     labeled_at: str = ""
+    captured_at: str = ""  # EXIF DateTimeOriginal (photo capture time), ISO seconds -- NOT
+    # labeled_at. Drives session synthesis; publish-safe (GPS/serials are never extracted).
     # Optional *position* labels (the in-app position tool, see chessvision/data/positions.py):
     # the known FEN placement field, the orientation chosen to match the photo, and the
     # nudged per-piece contact keypoints. Corner-only photos leave these empty.
@@ -158,6 +253,7 @@ class CornerLabel:
             "device": self.device,
             "surface": self.surface,
             "labeled_at": self.labeled_at,
+            "captured_at": self.captured_at,
         }
         if self.pieces:
             row["fen"] = self.fen
@@ -185,6 +281,7 @@ class CornerLabel:
             device=row.get("device", "") or "",
             surface=row.get("surface", "") or "",
             labeled_at=row.get("labeled_at", "") or "",
+            captured_at=row.get("captured_at", "") or "",
             fen=row.get("fen", "") or "",
             orientation=row.get("orientation", "") or "",
             pieces=pieces,
@@ -357,7 +454,9 @@ class CornerStore:
         re-marked corners invalidate the old projection.
         """
         path = self.inbox_path(src)
-        rgb, (w, h) = normalize_image(path.read_bytes())
+        raw = path.read_bytes()
+        rgb, (w, h) = normalize_image(raw)
+        exif_meta = extract_exif_meta(raw)  # publish-safe whitelist; GPS/serials never read
         label_id = _stable_id(src)
         image_rel = f"images/{label_id}.jpg"
         self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -378,9 +477,10 @@ class CornerStore:
             corners={k: (float(ordered[k][0]), float(ordered[k][1])) for k in CORNER_ORDER},
             board=board or "",
             piece_set=piece_set or "",
-            device=device or "",
+            device=device or exif_meta.get("device", ""),  # explicit arg wins; else EXIF
             surface=surface or "",
             labeled_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            captured_at=exif_meta.get("captured_at", ""),
             fen=fen or "",
             orientation=orientation or "",
             pieces=piece_tuples,
