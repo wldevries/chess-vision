@@ -494,6 +494,19 @@ def create_app(
             raise HTTPException(400, f"could not read image: {exc}") from exc
         return Response(content=data, media_type="image/jpeg")
 
+    @app.get("/api/store/image")
+    def store_image(path: str, w: int | None = None) -> Response:
+        """Serve any normalized store image by its relpath (== record id) -- e.g. the
+        session editor's photo previews. `w` downscales for thumbnails."""
+        store = _require_corner_store()
+        try:
+            data = store.store_image_bytes(path, max_width=w)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(400, f"could not read image: {exc}") from exc
+        return Response(content=data, media_type="image/jpeg")
+
     @app.get("/api/positions/library")
     def positions_library() -> dict[str, str]:
         """Saved {name: FEN} entries reused across same-setup photos."""

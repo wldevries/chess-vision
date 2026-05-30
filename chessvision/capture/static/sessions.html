@@ -111,7 +111,7 @@ function renderList() {
     row.className = "row" + (s.session_id === current ? " active" : "") + (s.board ? "" : " untagged");
     if (s.images.length) {
       const t = document.createElement("img");
-      t.src = `/captures/${s.session_id}/${s.images[0]}`; t.alt = ""; t.loading = "lazy";
+      t.src = `/api/store/image?path=${encodeURIComponent(s.images[0])}&w=240`; t.alt = ""; t.loading = "lazy";
       row.appendChild(t);
     }
     const col = document.createElement("span");
@@ -157,7 +157,7 @@ function renderPreview() {
   imgIdx = (imgIdx + s.images.length) % s.images.length;
   wrap.innerHTML = "";
   const img = document.createElement("img");
-  img.src = `/captures/${s.session_id}/${s.images[imgIdx]}`; img.alt = "";
+  img.src = `/api/store/image?path=${encodeURIComponent(s.images[imgIdx])}&w=900`; img.alt = "";
   wrap.appendChild(img);
   if (s.images.length > 1) {
     const nav = (cls, txt, step) => {

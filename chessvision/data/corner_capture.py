@@ -436,6 +436,27 @@ class CornerStore:
             rgb = cv2.resize(rgb, (max_width, new_h), interpolation=cv2.INTER_AREA)
         return encode_jpeg(rgb)
 
+    def store_image_bytes(self, rel: str, max_width: int | None = None) -> bytes:
+        """The normalized store JPEG at ``store/<rel>`` (the pixels labels are stored
+        against), optionally downscaled to `max_width`. `rel` is a store-relative path
+        (== the record id); path traversal is rejected. Unlike `normalized_bytes` (which
+        re-normalizes an inbox original) this serves the already-stored image directly, so
+        it works for ANY record, including the migrated capture sessions."""
+        path = (self.store / rel).resolve()
+        if not path.is_file() or self.store.resolve() not in path.parents:
+            raise FileNotFoundError(f"no such store image: {rel}")
+        data = path.read_bytes()
+        if not max_width:
+            return data
+        bgr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise ValueError(f"could not decode store image: {rel}")
+        if bgr.shape[1] > max_width:
+            h, w = bgr.shape[:2]
+            new_h = max(1, round(h * max_width / w))
+            bgr = cv2.resize(bgr, (max_width, new_h), interpolation=cv2.INTER_AREA)
+        return encode_jpeg(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+
     # ---- saving a label -----------------------------------------------------
 
     def save_label(

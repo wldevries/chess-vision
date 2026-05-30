@@ -177,6 +177,15 @@ def test_corner_label_inbox_image_and_save(corner_client: TestClient, tmp_path: 
     labels = (tmp_path / "corners" / "labels.jsonl").read_text(encoding="utf-8").strip()
     assert json.loads(labels)["board"] == "staunton-56mm"
 
+    # The saved record is now servable by its store relpath (== id) -- the session editor
+    # and full-store browsing use this; a labelled inbox photo's id is "inbox/<src>".
+    store_img = corner_client.get("/api/store/image", params={"path": "inbox/2026-05-27/IMG_1.jpg"})
+    assert store_img.status_code == 200 and store_img.headers["content-type"] == "image/jpeg"
+    assert Image.open(io.BytesIO(store_img.content)).size == (120, 80)
+    # Traversal is rejected.
+    bad = corner_client.get("/api/store/image", params={"path": "../labels.jsonl"})
+    assert bad.status_code == 404
+
 
 def test_corner_label_save_rejects_wrong_point_count(corner_client: TestClient) -> None:
     resp = corner_client.post(
