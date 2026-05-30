@@ -581,6 +581,54 @@ def assign_sessions(
 # --------------------------------------------------------------------------- #
 
 
+def split_store_for_keypoints(
+    store: CornerStore | str | Path,
+    *,
+    test_boards: Sequence[str] = (),
+    val_pose_frac: float = 0.25,
+    dedup_thr: float = 0.02,
+    max_per_pose_val: int = 2,
+) -> tuple[list[CornerLabel], list[CornerLabel], list[CornerLabel]]:
+    """Split the unified store's piece-labelled records into (train, val, test) for the
+    keypoint fine-tune.
+
+    test = whole boards in `test_boards`, held out of BOTH train and checkpoint selection
+    (the honest unseen-board number, e.g. dennis). val = a `val_pose_frac` share of each
+    remaining board's **pose clusters** (thinned to `max_per_pose_val`); train = everything
+    else. Splitting val by **pose, not session**, is the point: a capture session is one
+    viewpoint, the corner photos are many -- pose-clustering treats both uniformly and gives
+    a stable, viewpoint-diverse selection signal. See merge-corner-capture /
+    keypoint-split-rebalance.
+    """
+    store = store if isinstance(store, CornerStore) else CornerStore(store)
+    test_set = set(test_boards)
+    samples = store.position_samples()
+    test = [s for s in samples if (s.board or "(untagged)") in test_set]
+    rest = [s for s in samples if (s.board or "(untagged)") not in test_set]
+
+    by_board: dict[str, list[CornerLabel]] = defaultdict(list)
+    for s in rest:
+        by_board[s.board or "(untagged)"].append(s)
+
+    train: list[CornerLabel] = []
+    val: list[CornerLabel] = []
+    for recs in by_board.values():
+        clusters = _cluster_by_corners(recs, dedup_thr)
+        order = sorted(
+            range(len(clusters)),
+            key=lambda i: min(x.task_id for x in clusters[i]),  # noqa: B023
+        )
+        n = len(order)
+        n_val = 0 if n < 2 else min(n - 1, max(1, round(val_pose_frac * n)))
+        val_idx = set(_sample_evenly(order, n_val)) if n_val else set()
+        for i, cl in enumerate(clusters):
+            if i in val_idx:
+                val.extend(_sample_evenly(cl, max_per_pose_val))
+            else:
+                train.extend(cl)
+    return train, val, test
+
+
 def select_corner_dataset_poses(
     store: CornerStore | str | Path,
     *,

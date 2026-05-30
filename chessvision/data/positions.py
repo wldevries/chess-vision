@@ -96,32 +96,31 @@ def project_position(
     ]
 
 
-def position_samples_as_captures(store: CornerStore | str | Path) -> list[CaptureSample]:
-    """Position-labelled corner photos -> `CaptureSample`s for the keypoint fine-tune.
+def store_label_to_capture(label, store: CornerStore) -> CaptureSample:
+    """One position-labelled store record -> a `CaptureSample` for keypoint training.
 
-    Each labelled photo becomes one capture sample: the stored (EXIF-normalized) image,
-    its four corners, and one `PieceKeypoint` per nudged contact point. The **session is
-    keyed on the board** (``pos-<board>``) so the existing session-grouped split can hold
-    out a whole physical board as a generalization test -- exactly what the 2-board
-    capture set lacks (see captures-two-boards). Box sizing falls back to the global
-    `PIECE_HEIGHT_SCALE` (positions carry no piece-set tag), which only affects the
-    synthesized RoI, never the contact-point supervision.
+    Uses the record's **real `session`** (the unified store assigns every record a true
+    capture session; see merge-corner-capture). Falls back to ``pos-<board>`` only for a
+    legacy record that somehow lacks a session. The stored image is local (EXIF-free), so
+    the `s3_uri` is a never-hit placeholder. Box sizing falls back to the global
+    `PIECE_HEIGHT_SCALE` (only affects the synthesized RoI, never the contact-point label).
     """
+    pieces = [PieceKeypoint(label=lbl, point=(x, y)) for lbl, x, y in label.pieces]
+    return CaptureSample(
+        task_id=label.task_id,
+        session=label.session or f"pos-{label.board or '(untagged)'}",
+        image_path=store.store / label.image,
+        s3_uri=f"s3://corners/{label.image}",  # local file exists; S3 never hit
+        width=label.width,
+        height=label.height,
+        corners={k: (float(x), float(y)) for k, (x, y) in label.corners.items()},
+        pieces=pieces,
+    )
+
+
+def position_samples_as_captures(store: CornerStore | str | Path) -> list[CaptureSample]:
+    """All position-labelled store records -> `CaptureSample`s, keyed on each record's real
+    session. (Pre-merge this keyed everything on ``pos-<board>``; now the store carries true
+    sessions, so `store_label_to_capture` uses those -- see merge-corner-capture.)"""
     store = store if isinstance(store, CornerStore) else CornerStore(store)
-    samples: list[CaptureSample] = []
-    for label in store.position_samples():
-        image_path = store.store / label.image
-        pieces = [PieceKeypoint(label=lbl, point=(x, y)) for lbl, x, y in label.pieces]
-        samples.append(
-            CaptureSample(
-                task_id=label.task_id,
-                session=f"pos-{label.board or '(untagged)'}",
-                image_path=image_path,
-                s3_uri=f"s3://positions/{label.image}",  # local file exists; S3 never hit
-                width=label.width,
-                height=label.height,
-                corners={k: (float(x), float(y)) for k, (x, y) in label.corners.items()},
-                pieces=pieces,
-            )
-        )
-    return samples
+    return [store_label_to_capture(label, store) for label in store.position_samples()]
