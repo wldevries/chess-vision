@@ -33,7 +33,7 @@ import os
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -219,6 +219,8 @@ class CornerLabel:
     board: str = ""  # boards.json key; "" -> untagged
     piece_set: str = ""  # sets.json key (the physical piece set); "" -> untagged. Stored as
     # "set" in the row to mirror sessions.json; matters for the *piece* (position) labels.
+    session: str = ""  # synthesized capture session (YYYYMMDD-HHMMSS), grouping photos shot
+    # close in time on one board -- the split unit; see assign_sessions / [[merge corner+capture]]
     device: str = ""  # camera slug; auto-derived from EXIF (lens-aware) when present
     surface: str = ""
     labeled_at: str = ""
@@ -250,6 +252,7 @@ class CornerLabel:
             "corners": {k: [float(x), float(y)] for k, (x, y) in self.corners.items()},
             "board": self.board,
             "set": self.piece_set,
+            "session": self.session,
             "device": self.device,
             "surface": self.surface,
             "labeled_at": self.labeled_at,
@@ -278,6 +281,7 @@ class CornerLabel:
             corners={k: (float(v[0]), float(v[1])) for k, v in row["corners"].items()},
             board=row.get("board", "") or "",
             piece_set=row.get("set", "") or "",
+            session=row.get("session", "") or "",
             device=row.get("device", "") or "",
             surface=row.get("surface", "") or "",
             labeled_at=row.get("labeled_at", "") or "",
@@ -532,6 +536,44 @@ class CornerStore:
         self.store.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(self.positions_library_path, json.dumps(lib, indent=2, sort_keys=True))
         return lib
+
+
+# --------------------------------------------------------------------------- #
+# Session synthesis (group photos shot close in time on one board)
+# --------------------------------------------------------------------------- #
+
+
+def assign_sessions(
+    samples: Sequence[CornerLabel], *, gap_minutes: float = 20.0
+) -> dict[str, str]:
+    """Map each label id -> a synthesized capture session id.
+
+    Groups photos shot close in time on the same board into one session: walking the photos
+    in capture-time order, a **new session starts when the board changes or the gap from the
+    previous photo exceeds `gap_minutes`**. The session id is the burst's start time as
+    ``YYYYMMDD-HHMMSS`` -- the same format the capture set uses, so the two are
+    indistinguishable once merged. Samples without a ``captured_at`` are skipped (left
+    unsessioned). Deterministic: ordered by (captured_at, id).
+    """
+    dated = sorted(
+        (s for s in samples if s.captured_at), key=lambda s: (s.captured_at, s.id)
+    )
+    gap = timedelta(minutes=gap_minutes)
+    out: dict[str, str] = {}
+    cur: str | None = None
+    prev_t: datetime | None = None
+    prev_board: str | None = None
+    for s in dated:
+        try:
+            t = datetime.fromisoformat(s.captured_at)
+        except ValueError:
+            continue
+        board = s.board or "(untagged)"
+        if cur is None or board != prev_board or (t - prev_t) > gap:
+            cur = t.strftime("%Y%m%d-%H%M%S")
+        out[s.id] = cur
+        prev_t, prev_board = t, board
+    return out
 
 
 # --------------------------------------------------------------------------- #
