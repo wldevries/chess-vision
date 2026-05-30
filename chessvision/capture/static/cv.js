@@ -159,6 +159,11 @@ const CM = {
   dragging: null,   // index of the corner being dragged, or null
   opts: {},         // { initialPts, onSave(ordered, raw), autoPredict, tagProgress }
   predictAvailable: false,
+  // Pan/zoom view (same {scale, offx, offy} shape as containRect, so toDisplay/toNative
+  // work on it directly). null -> reset to fit on next draw. Mirrors positions.html.
+  view: null,
+  panning: null,    // {x, y} last pointer pos while panning, or null
+  spaceHeld: false, // hold Space to drag-pan instead of moving a corner
 
   // Probe whether the corner regressor is wired (--corner-ckpt). Returns the raw
   // availability object and toggles the Predict button. Safe to call when the button
@@ -176,6 +181,7 @@ const CM = {
     this.opts = opts;
     this.pts = (opts.initialPts && opts.initialPts.length === 4) ? opts.initialPts.map((p) => p.slice()) : [];
     this.dragging = null;
+    this.view = null; this.panning = null; this.spaceHeld = false;  // open at fit
     this.active = true;
     const tp = $("taggingProgress");
     if (tp) { if (opts.tagProgress) { tp.hidden = false; tp.innerHTML = opts.tagProgress; } else { tp.hidden = true; } }
@@ -186,12 +192,53 @@ const CM = {
 
   close() {
     this.active = false; this.pts = []; this.frozen = null; this.dragging = null; this.opts = {};
+    this.view = null; this.panning = null; this.spaceHeld = false;
     $("cornerModal").classList.remove("show");
   },
 
-  _rect() {
+  _fitView() {
     const c = $("cornerCanvas");
     return containRect(this.frozen.width, this.frozen.height, c.clientWidth, c.clientHeight);
+  },
+  _rect() {
+    if (!this.view) this.view = this._fitView();
+    return this.view;
+  },
+  // Keep the image inside the canvas when zoomed in, centred when it fits (like positions).
+  _clampView() {
+    const c = $("cornerCanvas"), w = c.clientWidth, h = c.clientHeight, v = this.view;
+    const iw = this.frozen.width * v.scale, ih = this.frozen.height * v.scale;
+    v.offx = iw <= w ? (w - iw) / 2 : Math.min(0, Math.max(w - iw, v.offx));
+    v.offy = ih <= h ? (h - ih) / 2 : Math.min(0, Math.max(h - ih, v.offy));
+  },
+  // Zoom about a canvas point (cx, cy), keeping the native px under it fixed. `value` is
+  // absolute (× fit) when `absolute`, else a relative factor on the current scale.
+  applyZoom(value, cx, cy, absolute = false) {
+    if (!this.frozen) return;
+    if (!this.view) this.view = this._fitView();
+    const fit = this._fitView().scale;
+    const target = absolute ? fit * value : this.view.scale * value;
+    const s = Math.max(fit, Math.min(fit * 8, target));  // never below fit, cap at 8× fit
+    const v = this.view;
+    const nx = (cx - v.offx) / v.scale, ny = (cy - v.offy) / v.scale;
+    this.view = { scale: s, offx: cx - nx * s, offy: cy - ny * s };
+    this._clampView(); this.redraw();
+  },
+  zoomCenter(value, absolute = false) {
+    const c = $("cornerCanvas");
+    this.applyZoom(value, c.clientWidth / 2, c.clientHeight / 2, absolute);
+  },
+  onWheel(ev) {
+    if (!this.active || !this.frozen) return;
+    ev.preventDefault();
+    if (!this.view) this.view = this._fitView();
+    if (ev.ctrlKey || ev.metaKey) {  // Ctrl/Cmd + scroll -> zoom about the cursor (Label Studio-style)
+      const rect = $("cornerCanvas").getBoundingClientRect();
+      this.applyZoom(Math.exp(-ev.deltaY * 0.0015), ev.clientX - rect.left, ev.clientY - rect.top);
+    } else {  // plain scroll -> pan
+      this.view = { scale: this.view.scale, offx: this.view.offx - ev.deltaX, offy: this.view.offy - ev.deltaY };
+      this._clampView(); this.redraw();
+    }
   },
   _toNative(ev) {
     const c = $("cornerCanvas"), rect = c.getBoundingClientRect(), r = this._rect();
@@ -214,23 +261,39 @@ const CM = {
     if (!this.active) return;
     ev.preventDefault();
     $("cornerCanvas").setPointerCapture(ev.pointerId);
+    if (this.spaceHeld || ev.button === 1) {  // Space-drag or middle-drag -> pan
+      this.panning = { x: ev.clientX, y: ev.clientY };
+      return;
+    }
     const hit = this._hit(ev);
     if (hit >= 0) { this.dragging = hit; return; }
     if (this.pts.length < 4) { this.pts.push(this._toNative(ev)); this.dragging = this.pts.length - 1; this.redraw(); }
   },
   pointerMove(ev) {
-    if (!this.active || this.dragging === null) return;
+    if (!this.active) return;
+    if (this.panning) {
+      if (!this.view) this.view = this._fitView();
+      this.view = { scale: this.view.scale, offx: this.view.offx + (ev.clientX - this.panning.x), offy: this.view.offy + (ev.clientY - this.panning.y) };
+      this.panning = { x: ev.clientX, y: ev.clientY };
+      this._clampView(); this.redraw();
+      return;
+    }
+    if (this.dragging === null) return;
     this.pts[this.dragging] = this._toNative(ev);
     this.redraw();
   },
-  pointerUp() { if (this.dragging !== null) { this.dragging = null; this.redraw(); } },
+  pointerUp() {
+    if (this.panning) { this.panning = null; return; }
+    if (this.dragging !== null) { this.dragging = null; this.redraw(); }
+  },
 
   redraw() {
     if (!this.frozen) return;
     const c = $("cornerCanvas");
     c.width = c.clientWidth; c.height = c.clientHeight;
     const ctx = c.getContext("2d");
-    const r = containRect(this.frozen.width, this.frozen.height, c.width, c.height);
+    const r = this._rect();
+    ctx.imageSmoothingQuality = "high";
     ctx.drawImage(this.frozen, r.offx, r.offy, this.frozen.width * r.scale, this.frozen.height * r.scale);
     ctx.lineWidth = 2; ctx.strokeStyle = "#4f8cff"; ctx.fillStyle = "#4f8cff"; ctx.font = "14px system-ui";
     // Outline through the *ordered* ring so it never self-crosses, whatever tap order.
@@ -265,6 +328,8 @@ const CM = {
       ? `Tap the 4 board corners in any order (${this.pts.length}/4). Drag any marker to adjust.`
       : "All 4 placed. Drag any corner until the grid lines up with the board squares, then Save.";
     $("saveCorner").disabled = this.pts.length !== 4;
+    const zr = $("cornerZoom");
+    if (zr) zr.textContent = `${(r.scale / this._fitView().scale).toFixed(1)}×`;
   },
 
   async predict() {
@@ -296,18 +361,30 @@ function cvWireCornerModal() {
   canvas.addEventListener("pointermove", (e) => CM.pointerMove(e));
   canvas.addEventListener("pointerup", () => CM.pointerUp());
   canvas.addEventListener("pointercancel", () => CM.pointerUp());
+  canvas.addEventListener("wheel", (e) => CM.onWheel(e), { passive: false });
   $("cornerModal").addEventListener("contextmenu", (e) => e.preventDefault());
   if ($("predictCorner")) $("predictCorner").onclick = () => CM.predict();
   if ($("cancelCorner")) $("cancelCorner").onclick = () => CM.close();
   if ($("saveCorner")) $("saveCorner").onclick = () => CM.save().catch((e) => toast(e.message));
-  window.addEventListener("resize", () => { if (CM.active && CM.frozen) CM.redraw(); });
-  // Esc/Enter while marking; stopImmediatePropagation so a page's keydown (snap/nav)
-  // doesn't also fire on the same key.
+  // Optional zoom controls (present only on pages that render them, e.g. corners.html).
+  if ($("cornerZoomIn")) $("cornerZoomIn").onclick = () => CM.zoomCenter(1.5);
+  if ($("cornerZoomOut")) $("cornerZoomOut").onclick = () => CM.zoomCenter(1 / 1.5);
+  if ($("cornerZoomFit")) $("cornerZoomFit").onclick = () => CM.zoomCenter(1, true);
+  // Resize changes the fit; reset to fit (precise work happens after re-zooming anyway).
+  window.addEventListener("resize", () => { if (CM.active && CM.frozen) { CM.view = null; CM.redraw(); } });
+  // Esc/Enter while marking + Ctrl/Cmd +/- zoom; stopImmediatePropagation so a page's
+  // keydown (snap/nav) doesn't also fire on the same key.
   document.addEventListener("keydown", (e) => {
     if (!CM.active) return;
+    if (e.ctrlKey || e.metaKey) {
+      if (e.key === "+" || e.key === "=") { e.preventDefault(); e.stopImmediatePropagation(); CM.zoomCenter(1.5); return; }
+      if (e.key === "-" || e.key === "_") { e.preventDefault(); e.stopImmediatePropagation(); CM.zoomCenter(1 / 1.5); return; }
+    }
     if (e.code === "Escape") { e.stopImmediatePropagation(); CM.close(); }
     else if (e.code === "Enter" && CM.pts.length === 4) { e.preventDefault(); e.stopImmediatePropagation(); CM.save().catch((err) => toast(err.message)); }
+    else if (e.code === "Space") { e.preventDefault(); CM.spaceHeld = true; }
   }, true);
+  document.addEventListener("keyup", (e) => { if (e.code === "Space") CM.spaceHeld = false; });
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", cvWireCornerModal);
 else cvWireCornerModal();

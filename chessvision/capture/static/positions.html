@@ -105,6 +105,7 @@
     <a class="backlink" href="/" title="Back to menu">☰ menu</a>
     <button id="pickBtn">Choose photo ▾</button>
     <button id="markBtn" disabled title="Mark or adjust the board corners">Corners</button>
+    <select id="setSelect" title="Piece set used (tagged onto the saved position)"></select>
     <select id="fenSelect" title="Saved positions"><option value="">— position —</option></select>
     <input id="fenInput" class="fen" placeholder="paste FEN / placement field" />
     <button id="addLibBtn" title="Save this FEN to the library">＋ save</button>
@@ -228,7 +229,7 @@ function thumb(p) {
   badge.textContent = p.positioned ? "✓" : (p.labeled ? "▦" : "·");
   badge.title = p.positioned ? "pieces placed" : (p.labeled ? "has corners" : "no corners yet");
   const tag = document.createElement("span"); tag.className = "cb-tag";
-  tag.textContent = p.src.split("/").pop() + (p.board ? ` · ${p.board}` : "");
+  tag.textContent = p.src.split("/").pop() + (p.board ? ` · ${p.board}` : "") + (p.set ? ` · ${p.set}` : "");
   d.append(img, badge, tag);
   d.onclick = () => { openPhoto(p); $("picker").classList.remove("show"); };
   return d;
@@ -258,6 +259,7 @@ function openPhoto(p) {
     pieces = (p.pieces || []).map((q) => ({ label: q.label, fen: FEN_LETTER[q.label] || "?", x: q.x, y: q.y }));
     orientIdx = Math.max(0, ORIENTATIONS.indexOf(p.orientation || "R0"));
     if (p.fen) $("fenInput").value = p.fen;
+    applyPhotoSet(p);
     $("stageHint").style.display = "none";
     $("zoomCtl").hidden = false;
     view = null;  // reset to fit for the new photo
@@ -490,11 +492,12 @@ function onUp() {
 async function save() {
   if (!cur || !corners || !pieces.length) return;
   const board = cur.board || localStorage.getItem("cv_corner_board") || "";
+  const set = $("setSelect").value || "";
   const r = await postJson("/api/positions/save", {
     src: cur.src, corners, fen: currentFen(), orientation: ORIENTATIONS[orientIdx],
-    pieces: pieces.map((p) => ({ label: p.label, x: p.x, y: p.y })), board,
+    pieces: pieces.map((p) => ({ label: p.label, x: p.x, y: p.y })), board, set,
   });
-  cur.positioned = true; cur.fen = r ? currentFen() : cur.fen;
+  cur.positioned = true; cur.fen = r ? currentFen() : cur.fen; cur.set = set;
   const local = photos.find((p) => p.src === cur.src);
   if (local) { local.positioned = true; local.fen = currentFen(); local.orientation = ORIENTATIONS[orientIdx]; }
   // Advance to the next photo needing work (the FEN stays in the input for same-setup
@@ -533,6 +536,47 @@ async function addToLibrary() {
   await loadLibrary();
   $("fenSelect").value = name.trim();
   toast("Saved to library ✓");
+}
+
+/* ---------- piece-set tag (sticky; persisted on the saved position) ---------- */
+const ADD_SET = "__add_set__";  // sentinel dropdown value -> "add a new set" flow
+async function loadSets() {
+  let sets = [];
+  try { sets = (await fetch("/api/meta").then(j)).sets || []; } catch { /* no sets.json */ }
+  fillSetSelect(sets);
+}
+function fillSetSelect(sets, selectValue) {
+  const sel = $("setSelect"); sel.innerHTML = "";
+  const blank = document.createElement("option"); blank.value = ""; blank.textContent = "(set?)"; sel.appendChild(blank);
+  sets.forEach((v) => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
+  const add = document.createElement("option"); add.value = ADD_SET; add.textContent = "➕ new set…"; sel.appendChild(add);
+  const saved = selectValue ?? localStorage.getItem("cv_set");
+  if (saved && sets.includes(saved)) sel.value = saved;
+  sel.onchange = onSetChange;
+}
+function onSetChange() {
+  const sel = $("setSelect");
+  if (sel.value === ADD_SET) { addSet(); return; }
+  localStorage.setItem("cv_set", sel.value);
+}
+async function addSet() {
+  const sel = $("setSelect");
+  const restore = () => { sel.value = localStorage.getItem("cv_set") || ""; };
+  const id = (prompt("New piece set id (e.g. tournament-plastic):") || "").trim();
+  if (!id) { restore(); return; }
+  try {
+    const m = await postJson("/api/meta/set", { id });
+    fillSetSelect(m.sets, id);
+    localStorage.setItem("cv_set", id);
+    toast(`Added set ${id} ✓`);
+  } catch (e) { restore(); toast("Add failed: " + e.message); }
+}
+// Select a photo's already-tagged set when re-opening one (without clobbering the
+// sticky choice for untagged photos).
+function applyPhotoSet(p) {
+  if (!p.set) return;
+  const sel = $("setSelect");
+  if ([...sel.options].some((o) => o.value === p.set)) { sel.value = p.set; localStorage.setItem("cv_set", p.set); }
 }
 
 /* ---------- wiring ---------- */
@@ -587,6 +631,7 @@ window.addEventListener("resize", () => { if (frozen) { view = null; redraw(); }
   try { avail = (await fetch("/api/positions/available").then(j)).available; } catch { /* off */ }
   if (!avail) { $("stageHint").textContent = "Position-label mode is off — launch the app with --corners-root."; return; }
   await CM.checkAssist();
+  await loadSets();
   await loadLibrary();
   await loadInbox();  // populate photos[] so we can jump straight to the first one to label
   const first = nextToLabel(null);

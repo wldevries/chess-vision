@@ -124,6 +124,8 @@ class CornerLabel:
     height: int
     corners: dict[str, tuple[float, float]]  # snake_case key -> (x, y) in the normalized frame
     board: str = ""  # boards.json key; "" -> untagged
+    piece_set: str = ""  # sets.json key (the physical piece set); "" -> untagged. Stored as
+    # "set" in the row to mirror sessions.json; matters for the *piece* (position) labels.
     device: str = ""
     surface: str = ""
     labeled_at: str = ""
@@ -152,6 +154,7 @@ class CornerLabel:
             "height": self.height,
             "corners": {k: [float(x), float(y)] for k, (x, y) in self.corners.items()},
             "board": self.board,
+            "set": self.piece_set,
             "device": self.device,
             "surface": self.surface,
             "labeled_at": self.labeled_at,
@@ -178,6 +181,7 @@ class CornerLabel:
             height=int(row["height"]),
             corners={k: (float(v[0]), float(v[1])) for k, v in row["corners"].items()},
             board=row.get("board", "") or "",
+            piece_set=row.get("set", "") or "",
             device=row.get("device", "") or "",
             surface=row.get("surface", "") or "",
             labeled_at=row.get("labeled_at", "") or "",
@@ -200,6 +204,7 @@ class InboxPhoto:
     date: str  # EXIF capture time if present, else file mtime; ISO seconds
     labeled: bool
     board: str  # the label's board if labelled, else ""
+    piece_set: str = ""  # the label's piece set (sets.json key) if tagged, else ""
     # Saved corners (TL/TR/BR/BL, [x, y] in the normalized frame) if labelled, else None —
     # lets the UI re-open a labelled photo with its handles already in place.
     corners: list[list[float]] | None = None
@@ -291,6 +296,7 @@ class CornerStore:
                     date=self._photo_date(path),
                     labeled=row is not None,
                     board=(row or {}).get("board", "") or "",
+                    piece_set=(row or {}).get("set", "") or "",
                     corners=corners,
                     positioned=bool(pieces),
                     fen=(row or {}).get("fen", "") or "",
@@ -331,6 +337,7 @@ class CornerStore:
         corners: Sequence[Sequence[float]] | dict,
         *,
         board: str = "",
+        piece_set: str = "",
         device: str = "",
         surface: str = "",
         fen: str = "",
@@ -370,6 +377,7 @@ class CornerStore:
             height=h,
             corners={k: (float(ordered[k][0]), float(ordered[k][1])) for k in CORNER_ORDER},
             board=board or "",
+            piece_set=piece_set or "",
             device=device or "",
             surface=surface or "",
             labeled_at=datetime.now(UTC).isoformat(timespec="seconds"),

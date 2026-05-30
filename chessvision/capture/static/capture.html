@@ -447,20 +447,46 @@ function renderReview() {
 function openModal(url) { $("modalImg").src = url; $("modal").classList.add("show"); }
 
 /* ---------- set/board datalists (from sets.json/boards.json) ---------- */
+const ADD_META = "__add_meta__";  // sentinel dropdown value -> "add a new set/board" flow
 async function loadMeta() {
   try {
     const m = await fetch("/api/meta").then(j);
-    fillMetaSelect("setSelect", m.sets, "cv_set");
-    fillMetaSelect("boardSelect", m.boards, "cv_board");
+    fillMetaSelect("setSelect", m.sets, "cv_set", "set");
+    fillMetaSelect("boardSelect", m.boards, "cv_board", "board");
   } catch { /* no metadata files -> selects stay empty, sessions just go untagged */ }
 }
-function fillMetaSelect(id, values, storeKey) {
+function fillMetaSelect(id, values, storeKey, kind, selectValue) {
   const sel = $(id);
   sel.innerHTML = "";
   values.forEach((v) => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
-  const saved = localStorage.getItem(storeKey);
+  const add = document.createElement("option"); add.value = ADD_META; add.textContent = `➕ new ${kind}…`; sel.appendChild(add);
+  const saved = selectValue ?? localStorage.getItem(storeKey);
   if (saved && values.includes(saved)) sel.value = saved;
-  sel.onchange = () => localStorage.setItem(storeKey, sel.value);
+  sel.onchange = () => {
+    if (sel.value === ADD_META) { addMeta(id, storeKey, kind); return; }
+    localStorage.setItem(storeKey, sel.value);
+  };
+}
+// "add a new set/board": prompt for the id (+ square_mm for boards), POST it into
+// sets.json/boards.json, then re-fill the dropdown and select the new entry.
+async function addMeta(id, storeKey, kind) {
+  const sel = $(id);
+  const restore = () => { sel.value = localStorage.getItem(storeKey) || ""; };
+  const hint = kind === "board" ? "named by square size, e.g. tournament-50mm" : "e.g. tournament-plastic";
+  const newId = (prompt(`New ${kind} id (${hint}):`) || "").trim();
+  if (!newId) { restore(); return; }
+  const body = { id: newId };
+  if (kind === "board") {
+    const mmStr = (prompt("Square size in mm (edge of one playing square; blank if unknown):") || "").trim();
+    if (mmStr) { const mm = parseFloat(mmStr); if (!isNaN(mm)) body.square_mm = mm; }
+  }
+  try {
+    const m = await postJson(`/api/meta/${kind}`, body);
+    const values = kind === "board" ? m.boards : m.sets;
+    fillMetaSelect(id, values, storeKey, kind, newId);
+    localStorage.setItem(storeKey, newId);
+    toast(`Added ${kind} ${newId} ✓`);
+  } catch (e) { restore(); toast("Add failed: " + e.message); }
 }
 
 /* ---------- wiring ---------- */

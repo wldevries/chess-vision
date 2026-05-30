@@ -101,6 +101,9 @@ class PositionSaveIn(BaseModel):
     orientation: str = "R0"
     pieces: list[PiecePointIn]
     board: str | None = None
+    piece_set: str | None = Field(None, alias="set")  # sets.json key for these pieces
+
+    model_config = {"populate_by_name": True}
 
 
 class PositionLibraryIn(BaseModel):
@@ -130,6 +133,26 @@ class SessionMetaIn(BaseModel):
     surface: str | None = None
 
     model_config = {"populate_by_name": True}
+
+
+class NewBoardIn(BaseModel):
+    """Register a new board in boards.json (corner/capture Board dropdowns). `id` is
+    the board key, named by square size by convention (e.g. "tournament-50mm").
+    `square_mm` is the edge length of one playing square — the one number that keeps
+    box synthesis correct across boards; null/omitted means unmeasured (falls back)."""
+
+    id: str
+    square_mm: float | None = None
+    note: str | None = None
+
+
+class NewSetIn(BaseModel):
+    """Register a new piece set in sets.json (capture Set dropdown). `id` is the set
+    key (e.g. "tournament-plastic"); per-piece measurements are left unset (box
+    synthesis falls back to PIECE_HEIGHT_SCALE) — fill them into sets.json later."""
+
+    id: str
+    note: str | None = None
 
 
 def render_board_svg(fen: str, lastmove_uci: str | None, view: str, size: int = 480) -> str:
@@ -504,6 +527,43 @@ def create_app(
         """Piece-set and board ids for the capture UI's Set/Board dropdowns."""
         return _meta_options(out_root)
 
+    def _add_meta_entry(name: str, kind: str, item_id: str, entry: dict) -> dict:
+        """Append a new entry to sets.json/boards.json, preserving existing content
+        (including comments). Returns the refreshed `_meta_options` so the caller's
+        dropdowns update in one round-trip."""
+        item_id = (item_id or "").strip()
+        if not item_id or item_id.startswith("_"):
+            raise HTTPException(400, "id must be non-empty and must not start with '_'")
+        path = out_root / name
+        data: dict = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise HTTPException(500, f"{name} is unreadable: {exc}") from exc
+        if item_id in data:
+            raise HTTPException(409, f"{kind} '{item_id}' already exists")
+        data[item_id] = entry
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return _meta_options(out_root)
+
+    @app.post("/api/meta/board")
+    def add_board(body: NewBoardIn) -> dict:
+        """Add a new board to boards.json (so it shows in the Board dropdowns)."""
+        entry: dict = {}
+        if body.note:
+            entry["_note"] = body.note
+        entry["square_mm"] = body.square_mm  # may be null -> unmeasured (falls back)
+        return _add_meta_entry("boards.json", "board", body.id, entry)
+
+    @app.post("/api/meta/set")
+    def add_set(body: NewSetIn) -> dict:
+        """Add a new piece set to sets.json (so it shows in the Set dropdown)."""
+        entry: dict = {}
+        if body.note:
+            entry["_note"] = body.note
+        return _add_meta_entry("sets.json", "set", body.id, entry)
+
     @app.get("/api/sessions")
     def list_sessions() -> list[dict]:
         """Every on-disk capture session with its current domain tags and the
@@ -876,6 +936,7 @@ def create_app(
                 "date": p.date,
                 "labeled": p.labeled,  # has corners
                 "board": p.board,
+                "set": p.piece_set,
                 "corners": p.corners,
                 "positioned": p.positioned,
                 "fen": p.fen,
@@ -957,6 +1018,7 @@ def create_app(
                 body.src,
                 body.corners,
                 board=body.board or "",
+                piece_set=body.piece_set or "",
                 fen=body.fen.split(" ", 1)[0],
                 orientation=body.orientation,
                 pieces=[p.model_dump() for p in body.pieces],
@@ -969,6 +1031,7 @@ def create_app(
             "id": label.id,
             "src": label.src,
             "board": label.board,
+            "set": label.piece_set,
             "positioned": True,
             "n_pieces": len(label.pieces),
         }

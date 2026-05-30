@@ -124,6 +124,30 @@ def client(tmp_path: Path) -> TestClient:
     return TestClient(create_app(games, tmp_path))
 
 
+def test_add_board_appends_to_boards_json(client: TestClient, tmp_path: Path) -> None:
+    assert client.get("/api/meta").json()["boards"] == []
+    resp = client.post("/api/meta/board", json={"id": "tournament-50mm", "square_mm": 50})
+    assert resp.status_code == 200
+    assert "tournament-50mm" in resp.json()["boards"]
+    # Persisted with the square_mm so box synthesis stays correct on the new board.
+    saved = json.loads((tmp_path / "boards.json").read_text())
+    assert saved["tournament-50mm"] == {"square_mm": 50}
+    # Shows up on the next fetch too.
+    assert "tournament-50mm" in client.get("/api/meta").json()["boards"]
+
+
+def test_add_set_appends_and_rejects_duplicates(client: TestClient) -> None:
+    assert client.post("/api/meta/set", json={"id": "tournament-plastic"}).status_code == 200
+    assert "tournament-plastic" in client.get("/api/meta").json()["sets"]
+    dup = client.post("/api/meta/set", json={"id": "tournament-plastic"})
+    assert dup.status_code == 409
+
+
+def test_add_meta_rejects_bad_ids(client: TestClient) -> None:
+    assert client.post("/api/meta/board", json={"id": ""}).status_code == 400
+    assert client.post("/api/meta/board", json={"id": "_comment"}).status_code == 400
+
+
 def test_finish_requires_a_capture(client: TestClient) -> None:
     game_id = client.get("/api/games").json()[0]["game_id"]
     sid = client.post("/api/session", data={"game_id": game_id}).json()["session_id"]

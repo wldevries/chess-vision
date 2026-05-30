@@ -50,6 +50,9 @@
   .corner-toolbar .tag-progress b { color: var(--accent); font-weight: 700; }
   .corner-toolbar .exit { margin-left: 22px; }
   .corner-toolbar select { max-width: 220px; }
+  .zoomctl { display: flex; gap: 6px; align-items: center; }
+  .zoomctl button { padding: 5px 9px; border-radius: 7px; font-size: 14px; }
+  .zoomctl .z { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; min-width: 42px; text-align: center; }
   .corner-canvas-area { flex: 1; position: relative; min-height: 0; }
   #cornerCanvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
 
@@ -100,6 +103,12 @@
     <div class="corner-toolbar">
       <span class="hint" id="cornerHint">Tap the 4 board corners.</span>
       <span class="tag-progress" id="taggingProgress" hidden></span>
+      <span class="zoomctl" title="Ctrl + scroll or Ctrl +/− to zoom · Space-drag to pan">
+        <button id="cornerZoomOut" title="Zoom out (Ctrl+−)">−</button>
+        <span class="z" id="cornerZoom">1.0×</span>
+        <button id="cornerZoomIn" title="Zoom in (Ctrl++)">＋</button>
+        <button id="cornerZoomFit" title="Fit to view">Fit</button>
+      </span>
       <select id="cornerBoard" title="Board for this photo (remembered)"></select>
       <button id="predictCorner" hidden>Predict</button>
       <button id="saveCorner" class="primary" disabled>Save</button>
@@ -130,16 +139,43 @@ async function checkAvailable() {
   }
   return true;
 }
+const ADD_BOARD = "__add_board__";  // sentinel dropdown value -> "add a new board" flow
 async function loadBoards() {
   try {
     const m = await fetch("/api/meta").then(j);
-    const sel = $("cornerBoard"); sel.innerHTML = "";
-    const blank = document.createElement("option"); blank.value = ""; blank.textContent = "(board?)"; sel.appendChild(blank);
-    m.boards.forEach((v) => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
-    const saved = localStorage.getItem("cv_corner_board");
-    if (saved && m.boards.includes(saved)) sel.value = saved;
-    sel.onchange = () => localStorage.setItem("cv_corner_board", sel.value);
+    fillBoardSelect(m.boards);
   } catch { /* no boards.json -> stays blank, photos go untagged */ }
+}
+function fillBoardSelect(boards, selectValue) {
+  const sel = $("cornerBoard"); sel.innerHTML = "";
+  const blank = document.createElement("option"); blank.value = ""; blank.textContent = "(board?)"; sel.appendChild(blank);
+  boards.forEach((v) => { const o = document.createElement("option"); o.value = v; o.textContent = v; sel.appendChild(o); });
+  const add = document.createElement("option"); add.value = ADD_BOARD; add.textContent = "➕ new board…"; sel.appendChild(add);
+  const saved = selectValue ?? localStorage.getItem("cv_corner_board");
+  if (saved && boards.includes(saved)) sel.value = saved;
+  sel.onchange = onBoardChange;
+}
+function onBoardChange() {
+  const sel = $("cornerBoard");
+  if (sel.value === ADD_BOARD) { addBoard(); return; }
+  localStorage.setItem("cv_corner_board", sel.value);
+}
+// "add a new board": prompt for the id (named by square size, e.g. tournament-50mm)
+// and the square edge in mm, POST it into boards.json, then re-fill + select it.
+async function addBoard() {
+  const sel = $("cornerBoard");
+  const restore = () => { sel.value = localStorage.getItem("cv_corner_board") || ""; };
+  const id = (prompt("New board id (named by square size, e.g. tournament-50mm):") || "").trim();
+  if (!id) { restore(); return; }
+  const mmStr = (prompt("Square size in mm (edge of one playing square; blank if unknown):") || "").trim();
+  const body = { id };
+  if (mmStr) { const mm = parseFloat(mmStr); if (!isNaN(mm)) body.square_mm = mm; }
+  try {
+    const m = await postJson("/api/meta/board", body);
+    fillBoardSelect(m.boards, id);
+    localStorage.setItem("cv_corner_board", id);
+    toast(`Added board ${id} ✓`);
+  } catch (e) { restore(); toast("Add failed: " + e.message); }
 }
 async function loadInbox() {
   const el = $("cornerBrowser");
