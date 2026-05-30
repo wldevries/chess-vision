@@ -44,7 +44,6 @@ async function avail(url) { try { return (await fetch(url).then((r) => r.json())
 // Each tool is always navigable, but cards whose launch flag is missing are dimmed with
 // a hint so the dependency (a CLI flag) is obvious without reading the docs.
 const TOOLS = [
-  { href: "/capture", ico: "📷", name: "Capture", desc: "Label a known game/puzzle: mark corners, snap each ply." },
   { href: "/positions", ico: "♜", name: "Label positions", desc: "Project a known FEN onto a corner photo and nudge piece bases.",
     check: () => avail("/api/positions/available"), need: "--corners-root" },
   { href: "/corners", ico: "▦", name: "Label corners", desc: "Mark board corners on staged phone photos.",

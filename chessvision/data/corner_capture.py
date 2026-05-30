@@ -30,7 +30,7 @@ import hashlib
 import io
 import json
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -519,6 +519,62 @@ class CornerStore:
         """Labels that also carry placed pieces (the keypoint-head training set from the
         in-app position tool): all four corners, piece keypoints, and image on disk."""
         return [s for s in self.samples() if s.has_pieces]
+
+    # ---- sessions (the in-app session editor) -------------------------------
+
+    def sessions_summary(self) -> list[dict]:
+        """Per-session domain tags + photo count, newest first -- drives the session
+        editor. Tags are the majority value across the session's records (sessions are
+        board-pure in practice)."""
+        by_session: dict[str, list[dict]] = defaultdict(list)
+        for row in self.load_labels().values():
+            by_session[row.get("session", "") or ""].append(row)
+        out: list[dict] = []
+        for sess, recs in sorted(by_session.items(), reverse=True):
+
+            def majority(key: str, recs=recs) -> str:
+                vals = [r.get(key, "") for r in recs if r.get(key)]
+                return Counter(vals).most_common(1)[0][0] if vals else ""
+
+            out.append(
+                {
+                    "session_id": sess,
+                    "set": majority("set"),
+                    "board": majority("board"),
+                    "device": majority("device"),
+                    "surface": majority("surface"),
+                    "n_captures": len(recs),
+                    "images": sorted(r["image"] for r in recs),
+                }
+            )
+        return out
+
+    def retag_session(
+        self,
+        session_id: str,
+        *,
+        board: str | None = None,
+        piece_set: str | None = None,
+        device: str | None = None,
+        surface: str | None = None,
+    ) -> dict | None:
+        """Bulk-set tags on every record whose session == `session_id` (None = leave as
+        is, "" = clear). Returns the session's resulting tags, or None if no such session."""
+        rows = self.load_labels()
+        targets = [r for r in rows.values() if (r.get("session", "") or "") == session_id]
+        if not targets:
+            return None
+        updates = {"board": board, "set": piece_set, "device": device, "surface": surface}
+        for r in targets:
+            for key, val in updates.items():
+                if val is not None:
+                    r[key] = val
+        self._write_labels(rows)
+        first = targets[0]
+        return {
+            "session_id": session_id,
+            **{k: first.get(k, "") for k in ("set", "board", "device", "surface")},
+        }
 
     # ---- position library (named FENs reused across same-setup photos) ------
 

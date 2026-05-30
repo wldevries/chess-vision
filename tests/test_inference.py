@@ -136,7 +136,7 @@ def _app(predictor=None, corner_predictor=None):
     from chessvision.capture.app import create_app
 
     return create_app(
-        [], "out_unused", predictor=predictor, corner_predictor=corner_predictor
+        "out_unused", predictor=predictor, corner_predictor=corner_predictor
     )
 
 

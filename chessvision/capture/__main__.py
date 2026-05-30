@@ -1,42 +1,25 @@
-"""Launch the position-capture web app.
+"""Launch the capture/labelling web app.
 
-    # bundled sample game, opens on http://127.0.0.1:8000
     uv run python -m chessvision.capture
 
-    # your own PGN collection (a file or a folder of .pgn files)
-    uv run python -m chessvision.capture --pgn games/carlsen.pgn
+Serves the labelling tools over the unified store: corner-label and position-label
+(inbox -> corners -> pieces), the session-metadata editor, and Read-position (live FEN).
+Capture mode (play a game/puzzle and snap photos) and the Label Studio pipeline are retired.
 
-    # pull a lichess user's recent online games
-    uv run python -m chessvision.capture --lichess-user DrNykterstein --max-games 20
-
-Puzzles can also be pulled live from the UI ("Next puzzle"), one fresh puzzle per
-click via the Lichess API — good for diverse, occlusion-heavy positions. Set
-LICHESS_TOKEN (a personal access token from lichess.org/account/oauth/token; the
-API has no user/password auth) in the environment or .env to de-duplicate against
-your solved puzzles and honour difficulty.
-
-Where to get historical pro games (download a .pgn and pass it with --pgn):
-  - pgnmentor.com/files.html       per-player collections (Carlsen, Fischer, ...)
-  - The Week in Chess (theweekinchess.com)   weekly tournament PGNs
-  - Lichess Elite Database          large filtered online-game dump
-
-Photos and a captures.jsonl (one row per photo, with the ground-truth FEN) are
-written under --out, one folder per session.
+    # corner/position labelling over data/ (the flat store), with corner-assist + Read mode
+    uv run python -m chessvision.capture \
+        --keypoint-ckpt runs/keypoint_captures/best.pt --corner-ckpt runs/corners/best.pt
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
 
 from chessvision.capture.app import create_app
-from chessvision.capture.games import Game, fetch_lichess_user, load_pgn_paths
-
-SAMPLE_PGN = Path(__file__).parent / "samples" / "opera_game.pgn"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -45,16 +28,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument(
-        "--pgn",
-        type=Path,
-        action="append",
-        default=[],
-        help="PGN file or directory (repeatable); omit to use the bundled sample",
-    )
-    p.add_argument("--lichess-user", default=None, help="also fetch this lichess user's games")
-    p.add_argument("--max-games", type=int, default=20, help="max games to fetch from lichess")
-    p.add_argument("--out", type=Path, default=Path("data/captures"), help="output directory")
     p.add_argument("--host", default="127.0.0.1", help="bind host (use 0.0.0.0 for LAN access)")
     p.add_argument("--port", type=int, default=8000)
     p.add_argument(
@@ -96,50 +69,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def load_games(args: argparse.Namespace) -> list[Game]:
-    games: list[Game] = []
-    if args.pgn:
-        games.extend(load_pgn_paths(args.pgn))
-    if args.lichess_user:
-        games.extend(fetch_lichess_user(args.lichess_user, args.max_games))
-    if not games:
-        games.extend(load_pgn_paths([SAMPLE_PGN]))
-    return games
-
-
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     args = parse_args(argv)
-    games = load_games(args)
-    if not games:
-        print("No games loaded. Pass --pgn FILE or --lichess-user NAME.")
-        return 1
 
-    token = os.environ.get("LICHESS_TOKEN")
-    print(f"Loaded {len(games)} game(s); writing captures under {args.out.resolve()}")
-    print("Live puzzles: " + ("token set" if token else "anonymous (set LICHESS_TOKEN to dedupe)"))
-    print(
-        f"Open http://{args.host}:{args.port} on the tablet, then pick a game and start snapping."
-    )
+    print(f"Open http://{args.host}:{args.port}  ·  labelling over {args.corners_root}")
     if args.keypoint_ckpt and args.corner_ckpt:
-        print(
-            f"Read-position mode ON · pieces {args.keypoint_ckpt} · corners {args.corner_ckpt}"
-        )
+        print(f"Read-position mode ON · pieces {args.keypoint_ckpt} · corners {args.corner_ckpt}")
     elif args.keypoint_ckpt:
-        print(
-            "Read-position mode OFF: --keypoint-ckpt also needs --corner-ckpt "
-            "(corners are auto-detected per read)"
-        )
+        print("Read-position mode OFF: --keypoint-ckpt also needs --corner-ckpt")
     if args.corner_ckpt:
         print(f"Corner-assist ON · checkpoint {args.corner_ckpt}")
-    if args.corners_root:
-        print(
-            f"Corner-label mode ON · staging {args.corners_root}/inbox -> {args.corners_root}/store"
-        )
+
     app = create_app(
-        games,
-        args.out,
-        lichess_token=token,
+        # out_root only backstops the Set/Board metadata when no store is wired; with the
+        # flat store the dropdowns read from --corners-root, so this is rarely used.
+        args.corners_root or Path("data"),
         keypoint_ckpt=args.keypoint_ckpt,
         corner_ckpt=args.corner_ckpt,
         corners_root=args.corners_root,

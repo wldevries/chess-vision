@@ -11,14 +11,11 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from chessvision.capture.app import create_app
-from chessvision.capture.games import load_pgn_file
 from chessvision.data.corner_capture import (
     CornerStore,
     normalize_image,
     select_corner_dataset_poses,
 )
-
-SAMPLE_PGN = Path("chessvision/capture/samples/opera_game.pgn")
 
 
 def _write_inbox_jpeg(
@@ -147,14 +144,13 @@ def test_split_holds_out_whole_poses_per_board(tmp_path: Path) -> None:
 
 @pytest.fixture
 def corner_client(tmp_path: Path) -> TestClient:
-    games = load_pgn_file(SAMPLE_PGN)
     store = CornerStore(tmp_path / "corners")
     _write_inbox_jpeg(store.inbox / "2026-05-27" / "IMG_1.jpg")
-    return TestClient(create_app(games, tmp_path / "captures", corner_store=store))
+    return TestClient(create_app(tmp_path / "captures", corner_store=store))
 
 
 def test_corner_label_off_by_default(tmp_path: Path) -> None:
-    client = TestClient(create_app(load_pgn_file(SAMPLE_PGN), tmp_path))
+    client = TestClient(create_app(tmp_path))
     assert client.get("/api/corners-label/available").json()["available"] is False
     assert client.get("/api/corners-label/inbox").status_code == 503
 
