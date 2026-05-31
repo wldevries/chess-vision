@@ -36,6 +36,7 @@ from torch.utils.data import Dataset
 
 from chessvision.data.chessred import AnnotatedImage, ChessReD
 from chessvision.data.contact import contact_points
+from chessvision.geometry import board_crop_bbox
 
 # ChessReD category_id 0..11 are the 12 pieces (12 == "empty", which has no box).
 # Detector label = category_id + 1; label 0 is torchvision's background.
@@ -73,6 +74,12 @@ class DetectionConfig:
     blur: float = 0.0  # max Gaussian blur sigma in px (depth-of-field softening)
     motion_blur: float = 0.0  # max linear motion-blur kernel length px (directional camera shake)
     noise: float = 0.0  # max additive Gaussian noise std as a fraction of 255 (low-light grain)
+    # Board crop: slice to the board bbox (+asymmetric margin) before resize, so pieces get more
+    # pixels and clutter/padding shrink. MUST match the eval crop (geometry.board_crop_bbox).
+    board_crop: bool = False
+    crop_side: float = 0.12  # side margin as a fraction of the corner-bbox width
+    crop_top: float = 0.30  # top margin (extra headroom for back-leaning pieces)
+    crop_bottom: float = 0.08  # bottom margin
 
 
 def collate_detection(batch):
@@ -108,6 +115,28 @@ def _motion_blur_kernel(length: int, angle_deg: float) -> np.ndarray:
     kernel = cv2.warpAffine(kernel, m, (length, length))
     s = float(kernel.sum())
     return kernel / s if s > 0 else kernel
+
+
+def apply_board_crop(
+    rgb: np.ndarray,
+    boxes: np.ndarray,
+    keypoints: np.ndarray | None,
+    bbox: tuple[int, int, int, int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
+    """Crop `rgb` to `bbox` (x0,y0,x1,y1 from `geometry.board_crop_bbox`) and translate
+    boxes/keypoints into the crop frame (boxes clipped to the crop; the contact keypoint is on
+    the board so it always survives). Run BEFORE resize, on full-frame targets."""
+    x0, y0, x1, y1 = bbox
+    rgb = rgb[y0:y1, x0:x1]
+    if boxes.size:
+        boxes = boxes.copy()
+        boxes[:, [0, 2]] = np.clip(boxes[:, [0, 2]] - x0, 0, x1 - x0)
+        boxes[:, [1, 3]] = np.clip(boxes[:, [1, 3]] - y0, 0, y1 - y0)
+    if keypoints is not None and keypoints.size:
+        keypoints = keypoints.copy()
+        keypoints[:, :, 0] -= x0
+        keypoints[:, :, 1] -= y0
+    return rgb, boxes, keypoints
 
 
 def augment_targets(
@@ -296,6 +325,14 @@ class ChessReDKeypointDetection(ChessReDDetection):
         boxes = np.asarray(boxes, dtype=np.float32).reshape(-1, 4)
         labels = np.asarray(labels, dtype=np.int64)
         keypoints = np.asarray(kpts, dtype=np.float32).reshape(-1, 1, 3)
+
+        if self.config.board_crop and annotated.corners:
+            h, w = rgb.shape[:2]
+            c = self.config
+            bbox = board_crop_bbox(
+                annotated.corners, w, h, side=c.crop_side, top=c.crop_top, bottom=c.crop_bottom
+            )
+            rgb, boxes, keypoints = apply_board_crop(rgb, boxes, keypoints, bbox)
 
         rgb, boxes, keypoints = self._resize(rgb, boxes, keypoints)
         if self.train:

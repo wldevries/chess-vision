@@ -26,12 +26,12 @@ from chessvision.data.capture_detection import synthesize_piece_targets
 from chessvision.data.captures import CaptureSample
 from chessvision.data.detection import resize_targets
 from chessvision.data.storage import StorageConfig
-from chessvision.geometry import Orientation, compute_homography, square_for_point
-
-
-def _scaled_homography(sample: CaptureSample, scale: float) -> np.ndarray:
-    corners = {k: (x * scale, y * scale) for k, (x, y) in sample.corners.items()}
-    return compute_homography(corners, Orientation.R0)
+from chessvision.geometry import (
+    Orientation,
+    board_crop_bbox,
+    compute_homography,
+    square_for_point,
+)
 
 
 def _gt_board(sample: CaptureSample) -> dict[str, int]:
@@ -55,15 +55,32 @@ def _detect_squares(
     *,
     max_size: int,
     score_thresh: float,
+    board_crop: bool = False,
+    crop_side: float = 0.12,
+    crop_top: float = 0.30,
+    crop_bottom: float = 0.08,
 ) -> dict[str, tuple[float, int]]:
     """square -> (score, label) of the best detection on it, via the contact keypoint
     mapped through the GT-corner homography. Shared by `evaluate_captures` and
-    `confusion_captures` so the two never drift apart."""
+    `confusion_captures` so the two never drift apart.
+
+    With `board_crop` the image is sliced to the GT board bbox first (same geometry as the
+    board-crop training path) and the homography is built in the crop+resized frame, so a
+    crop-trained model is evaluated on the matching framing (train == eval)."""
     rgb = sample.load_image(s3)
     h, w = rgb.shape[:2]
-    scale = min(1.0, max_size / max(h, w))
+    ox, oy = 0.0, 0.0
+    if board_crop:
+        x0, y0, x1, y1 = board_crop_bbox(
+            sample.corners, w, h, side=crop_side, top=crop_top, bottom=crop_bottom
+        )
+        rgb = rgb[y0:y1, x0:x1]
+        ox, oy = float(x0), float(y0)
+    hs, ws = rgb.shape[:2]
+    scale = min(1.0, max_size / max(hs, ws))
     rgb, _, _ = resize_targets(rgb, np.zeros((0, 4), np.float32), None, max_size)
-    homography = _scaled_homography(sample, scale)
+    corners = {k: ((x - ox) * scale, (y - oy) * scale) for k, (x, y) in sample.corners.items()}
+    homography = compute_homography(corners, Orientation.R0)
     image = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float().to(device) / 255
     out = model([image])[0]
     best: dict[str, tuple[float, int]] = {}
@@ -92,9 +109,17 @@ def evaluate_captures(
     *,
     max_size: int = 1333,
     score_thresh: float = 0.5,
+    board_crop: bool = False,
+    crop_side: float = 0.12,
+    crop_top: float = 0.30,
+    crop_bottom: float = 0.08,
 ) -> dict[str, float | int]:
-    """Run `model` over capture `samples`; return summed counts + derived rates."""
+    """Run `model` over capture `samples`; return summed counts + derived rates. Pass
+    `board_crop=True` (matching the training crop) to eval a board-crop-trained model."""
     model.eval()
+    crop = dict(
+        board_crop=board_crop, crop_side=crop_side, crop_top=crop_top, crop_bottom=crop_bottom
+    )
     counts = defaultdict(int)
     for sample in samples:
         gt = _gt_board(sample)
@@ -104,7 +129,7 @@ def evaluate_captures(
             continue
 
         best = _detect_squares(
-            model, sample, s3, device, max_size=max_size, score_thresh=score_thresh
+            model, sample, s3, device, max_size=max_size, score_thresh=score_thresh, **crop
         )
 
         frame_ok = True
@@ -140,6 +165,10 @@ def confusion_captures(
     *,
     max_size: int = 1333,
     score_thresh: float = 0.5,
+    board_crop: bool = False,
+    crop_side: float = 0.12,
+    crop_top: float = 0.30,
+    crop_bottom: float = 0.08,
 ) -> tuple[Counter, Counter]:
     """Square-level confusion over the held-out GT pieces, to show *where* class_acc
     leaks. Returns ``(confusion, false_pos)``:
@@ -154,6 +183,9 @@ def confusion_captures(
     (2026-05-29), so this faithfully attributes the class error without the corner model.
     """
     model.eval()
+    crop = dict(
+        board_crop=board_crop, crop_side=crop_side, crop_top=crop_top, crop_bottom=crop_bottom
+    )
     confusion: Counter = Counter()
     false_pos: Counter = Counter()
     for sample in samples:
@@ -161,7 +193,7 @@ def confusion_captures(
         if not gt:
             continue
         best = _detect_squares(
-            model, sample, s3, device, max_size=max_size, score_thresh=score_thresh
+            model, sample, s3, device, max_size=max_size, score_thresh=score_thresh, **crop
         )
         for sq, gt_label in gt.items():
             pred = best[sq][1] if sq in best else None

@@ -32,11 +32,17 @@ import torch
 from torch.utils.data import Dataset
 
 from chessvision.data.captures import CaptureDataset, CaptureSample
-from chessvision.data.detection import DetectionConfig, augment_targets, resize_targets
+from chessvision.data.detection import (
+    DetectionConfig,
+    apply_board_crop,
+    augment_targets,
+    resize_targets,
+)
 from chessvision.data.storage import StorageConfig
 from chessvision.geometry import (
     PIECE_HEIGHT_SCALE,
     Orientation,
+    board_crop_bbox,
     compute_homography,
     project_piece_box,
     square_for_point,
@@ -152,6 +158,14 @@ class CaptureKeypointDetection(Dataset):
         boxes, labels, keypoints = synthesize_piece_targets(
             sample, radius_squares=self.config.radius_squares, margin=self.config.margin
         )
+
+        if self.config.board_crop:
+            h, w = rgb.shape[:2]
+            c = self.config
+            bbox = board_crop_bbox(
+                sample.corners, w, h, side=c.crop_side, top=c.crop_top, bottom=c.crop_bottom
+            )
+            rgb, boxes, keypoints = apply_board_crop(rgb, boxes, keypoints, bbox)
 
         rgb, boxes, keypoints = resize_targets(rgb, boxes, keypoints, self.config.max_size)
         if self.train:

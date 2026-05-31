@@ -24,7 +24,7 @@ from chessvision.corner_regressor import corners_from_lattice, load_corner_regre
 from chessvision.data.capture_detection import CaptureKeypointConfig, split_by_sessions
 from chessvision.data.captures import CaptureDataset
 from chessvision.data.detection import resize_targets
-from chessvision.geometry import compute_homography, square_for_point
+from chessvision.geometry import board_crop_bbox, compute_homography, square_for_point
 from chessvision.keypoint_detector import load_keypoint_detector
 from scripts.finetune_keypoint_captures import DEFAULT_VAL_SESSIONS
 
@@ -41,6 +41,9 @@ def evaluate_end_to_end(
     score_thresh: float = 0.5,
     use_conf: bool = True,
     board_crop: bool = False,
+    crop_side: float = 0.12,
+    crop_top: float = 0.30,
+    crop_bottom: float = 0.08,
 ) -> dict[str, float | int]:
     """Same logic/metrics as `evaluate_captures`, but the detection-mapping homography
     comes from the corner MODEL's prediction (not the GT corners). Truth (`_gt_board`)
@@ -69,13 +72,10 @@ def evaluate_end_to_end(
         ox, oy = 0.0, 0.0
         rgb_src = rgb_full
         if board_crop:
-            xs = [p[0] for p in pred_pts]
-            ys = [p[1] for p in pred_pts]
-            bw, bh = max(xs) - min(xs), max(ys) - min(ys)
-            x0 = max(0, int(min(xs) - 0.12 * bw))
-            x1 = min(w, int(max(xs) + 0.12 * bw))
-            y0 = max(0, int(min(ys) - 0.30 * bh))
-            y1 = min(h, int(max(ys) + 0.08 * bh))
+            # Same geometry as training, but from the corner MODEL's points (deployment has no GT).
+            x0, y0, x1, y1 = board_crop_bbox(
+                dict(enumerate(pred_pts)), w, h, side=crop_side, top=crop_top, bottom=crop_bottom
+            )
             rgb_src = rgb_full[y0:y1, x0:x1]
             ox, oy = float(x0), float(y0)
 
@@ -172,7 +172,12 @@ def main(argv: list[str] | None = None) -> int:
 
     keys = ("localization", "class_acc", "board_exact", "board_exact_rate")
     ceiling = evaluate_captures(
-        kp, val_ds.samples, dataset.s3, device, max_size=args.max_size, score_thresh=args.score_thresh
+        kp,
+        val_ds.samples,
+        dataset.s3,
+        device,
+        max_size=args.max_size,
+        score_thresh=args.score_thresh,
     )
     e2e = evaluate_end_to_end(
         kp,

@@ -27,6 +27,7 @@ from chessvision.data.contact import occluded_pieces
 from chessvision.geometry import (
     Orientation,
     bbox_base_point,
+    board_crop_bbox,
     compute_homography,
     square_for_point,
 )
@@ -49,15 +50,20 @@ def evaluate_squares(
     iou_thresh: float = 0.5,
     tol: float = 0.06,
     offset: float = 0.05,
+    board_crop: bool = False,
+    crop_side: float = 0.12,
+    crop_top: float = 0.30,
+    crop_bottom: float = 0.08,
 ) -> dict[str, dict[str, int]]:
-    """Accumulate keypoint vs box-bottom square correctness over `image_ids`."""
+    """Accumulate keypoint vs box-bottom square correctness over `image_ids`. With `board_crop`
+    the image is sliced to the board bbox (same geometry as training) and corners + GT boxes are
+    translated into the crop frame, so a crop-trained model is scored on matching framing."""
     model.eval()
     overall, occ = _blank(), _blank()
     for image_id in image_ids:
         corners = chessred.corners(image_id)
         if not corners:
             continue
-        homography = compute_homography(corners, Orientation.R0)
         meta = chessred.meta(image_id)
         pieces = [p for p in chessred.pieces(image_id) if p.bbox is not None]
         if not pieces:
@@ -69,13 +75,24 @@ def evaluate_squares(
 
         bgr = cv2.imread(str(chessred.resolve_image_path(meta)), cv2.IMREAD_COLOR)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        ox, oy = 0.0, 0.0
+        if board_crop:
+            img_h, img_w = rgb.shape[:2]
+            x0, y0, x1, y1 = board_crop_bbox(
+                corners, img_w, img_h, side=crop_side, top=crop_top, bottom=crop_bottom
+            )
+            rgb = rgb[y0:y1, x0:x1]
+            ox, oy = float(x0), float(y0)
+        homography = compute_homography(
+            {k: (p[0] - ox, p[1] - oy) for k, p in corners.items()}, Orientation.R0
+        )
         t = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float().div(255).to(device)
         out = model([t])[0]
         keep = out["scores"] >= score_thresh
         p_boxes, p_labels, p_kps = out["boxes"][keep], out["labels"][keep], out["keypoints"][keep]
 
         gt_boxes = torch.tensor(
-            [[x, y, x + w, y + h] for (x, y, w, h) in (p.bbox for p in pieces)],
+            [[x - ox, y - oy, x - ox + w, y - oy + h] for (x, y, w, h) in (p.bbox for p in pieces)],
             dtype=torch.float32,
             device=device,
         )

@@ -37,7 +37,7 @@ from chessvision.corner_regressor import load_corner_regressor
 from chessvision.data.corner_capture import CornerStore, split_store_for_keypoints
 from chessvision.data.detection import LABEL_NAMES
 from chessvision.data.positions import store_label_to_capture
-from chessvision.keypoint_detector import load_keypoint_detector
+from chessvision.keypoint_detector import load_keypoint_detector, read_keypoint_preprocess
 from scripts.eval_end_to_end_captures import evaluate_end_to_end
 
 KEYS = ("frames", "gt_pieces", "localization", "class_acc", "board_exact", "board_exact_rate")
@@ -100,6 +100,12 @@ def main(argv: list[str] | None = None) -> int:
     add("--val-pose-frac", type=float, default=0.25, help="share of each board's poses -> val")
     add("--dedup-thr", type=float, default=0.02, help="pose-cluster dist (frac img)")
     add("--all-frames", action="store_true", help="eval every frame per board, ignoring the split")
+    add(
+        "--board-crop",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="slice to the board bbox; default reads the checkpoint's recorded crop config",
+    )
     add("--only-board", default=None, help="restrict to one board id (e.g. staunton-56mm)")
     add("--confusion", action="store_true", help="also dump a per-GT-class confusion breakdown")
     add("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -145,10 +151,30 @@ def main(argv: list[str] | None = None) -> int:
     kp = load_keypoint_detector(args.keypoint_ckpt, device)
     corner = load_corner_regressor(args.corner_ckpt, device=device)
 
+    # Match the framing the model trained on: take the crop config from the checkpoint, unless
+    # --board-crop/--no-board-crop overrides. Stops a silent train/eval scale-shift mismatch.
+    pre = read_keypoint_preprocess(args.keypoint_ckpt)
+    use_crop = pre.get("board_crop", False) if args.board_crop is None else args.board_crop
+    crop = dict(
+        board_crop=use_crop,
+        crop_side=pre.get("crop_side", 0.12),
+        crop_top=pre.get("crop_top", 0.30),
+        crop_bottom=pre.get("crop_bottom", 0.08),
+    )
+    src = "checkpoint" if args.board_crop is None else "override"
+    print(f"board_crop={use_crop} (from {src}); margins side/top/bottom="
+          f"{crop['crop_side']}/{crop['crop_top']}/{crop['crop_bottom']}")
+
     print("\n", "=" * 70, sep="")
     for b, grp in sorted(by_board.items()):
         ceiling = evaluate_captures(
-            kp, grp, None, device, max_size=args.max_size, score_thresh=args.score_thresh
+            kp,
+            grp,
+            None,
+            device,
+            max_size=args.max_size,
+            score_thresh=args.score_thresh,
+            **crop,
         )
         e2e = evaluate_end_to_end(
             kp,
@@ -158,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             device,
             max_size=args.max_size,
             score_thresh=args.score_thresh,
+            **crop,
         )
         print(f"\n### {b} [{split_of[b]}]  ({len(grp)} frames)")
         print("  GT-corner ceiling  :", json.dumps(_round(ceiling)))
@@ -170,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
                 device,
                 max_size=args.max_size,
                 score_thresh=args.score_thresh,
+                **crop,
             )
             print("  confusion (GT class -> prediction):")
             print_confusion(confusion, false_pos)

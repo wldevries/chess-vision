@@ -98,6 +98,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--aug-blur", type=float, default=0.0, help="max Gaussian blur sigma px (e.g. 1.0)")
     add("--aug-motion-blur", type=float, default=0.0, help="max motion-blur length px (e.g. 5)")
     add("--aug-noise", type=float, default=0.0, help="max noise std /255, low-light (e.g. 0.03)")
+    # Board crop: slice both domains to the board bbox (+margin); recorded in the .pt for eval
+    add("--board-crop", action="store_true", help="train on board-sliced images (eval must match)")
+    add("--crop-side", type=float, default=0.12, help="board-crop side margin (frac of bbox)")
+    add("--crop-top", type=float, default=0.30, help="board-crop top margin (headroom)")
+    add("--crop-bottom", type=float, default=0.08, help="board-crop bottom margin")
     add("--workers", type=int, default=4)
     add("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     add("--amp", action="store_true")
@@ -115,6 +120,10 @@ def build_datasets(args):
         blur=args.aug_blur,
         motion_blur=args.aug_motion_blur,
         noise=args.aug_noise,
+        board_crop=args.board_crop,  # slice both domains to the board; eval must match
+        crop_side=args.crop_side,
+        crop_top=args.crop_top,
+        crop_bottom=args.crop_bottom,
     )
     cfg_train = CaptureKeypointConfig(
         max_size=args.max_size, hflip_prob=args.hflip, jitter=args.jitter, **aug
@@ -259,13 +268,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     scaler = torch.amp.GradScaler() if (args.amp and device.type == "cuda") else None
 
+    # Eval must use the same framing the model trained on, else scale-shift garbage.
+    crop_eval = dict(
+        board_crop=args.board_crop,
+        crop_side=args.crop_side,
+        crop_top=args.crop_top,
+        crop_bottom=args.crop_bottom,
+    )
+    # Stamped into the .pt so eval can auto-match the training framing (no silent mismatch).
+    preprocess = {**crop_eval, "max_size": args.max_size}
+
     def eval_store(samples):
         return evaluate_captures(
-            model, samples, None, device, max_size=args.max_size, score_thresh=args.score_thresh
+            model,
+            samples,
+            None,
+            device,
+            max_size=args.max_size,
+            score_thresh=args.score_thresh,
+            **crop_eval,
         )
 
     def eval_chessred():
-        counts = evaluate_squares(model, chessred, cr_val_ids, device)
+        counts = evaluate_squares(model, chessred, cr_val_ids, device, **crop_eval)
         r = {k: rates(v) for k, v in counts.items()}
         return {"kp_square_acc": r["overall"]["kp_square_acc"], "overall": r["overall"]}
 
@@ -287,10 +312,14 @@ def main(argv: list[str] | None = None) -> int:
         # Select on store val class_acc -- the deployment metric, comparable to keypoint_captures.
         if val["class_acc"] > best:
             best = val["class_acc"]
-            save_keypoint_checkpoint(model, args.out_dir / "best.pt", epoch=epoch, val=val)
+            save_keypoint_checkpoint(
+                model, args.out_dir / "best.pt", epoch=epoch, val=val, preprocess=preprocess
+            )
         print(json.dumps(row), flush=True)
         history.append(row)
-        save_keypoint_checkpoint(model, args.out_dir / "last.pt", epoch=epoch)
+        save_keypoint_checkpoint(
+            model, args.out_dir / "last.pt", epoch=epoch, preprocess=preprocess
+        )
         (args.out_dir / "history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
 
     print(f"done. best store val class_acc {best:.4f}")

@@ -180,3 +180,11 @@ def load_keypoint_detector(path: str | Path, device: str | torch.device = "cpu")
     model.load_state_dict(ckpt["state_dict"])
     model.to(device).eval()
     return model
+
+
+def read_keypoint_preprocess(path: str | Path) -> dict:
+    """The preprocess metadata stamped into a keypoint checkpoint (board_crop flag + crop margins
+    + max_size), so eval can auto-match the framing the model trained on instead of relying on a
+    remembered flag. Returns ``{}`` for older checkpoints saved without it."""
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
+    return dict(ckpt.get("preprocess") or {})

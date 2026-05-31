@@ -88,6 +88,32 @@ def order_corners(points: Sequence[Point]) -> CornerDict:
     }
 
 
+def board_crop_bbox(
+    corners: Corners,
+    img_w: int,
+    img_h: int,
+    *,
+    side: float = 0.12,
+    top: float = 0.30,
+    bottom: float = 0.08,
+) -> tuple[int, int, int, int]:
+    """Integer crop box ``(x0, y0, x1, y1)`` around the board corners, expanded by margins
+    (fractions of the corner-bbox size) and clipped to the image. Asymmetric by design: extra
+    ``top`` headroom because pieces lean away from the camera into the back ranks, so their tops
+    sit above the board's far edge and a tight bbox would clip back-rank king/queen tops. Shared
+    by the board-crop training path and every eval path so train == eval framing (the consistency
+    that makes board-crop work -- inference-only cropping regressed class_acc, see the notes).
+    """
+    xs = [float(p[0]) for p in corners.values()]
+    ys = [float(p[1]) for p in corners.values()]
+    bw, bh = max(xs) - min(xs), max(ys) - min(ys)
+    x0 = max(0, int(min(xs) - side * bw))
+    x1 = min(int(img_w), int(max(xs) + side * bw))
+    y0 = max(0, int(min(ys) - top * bh))
+    y1 = min(int(img_h), int(max(ys) + bottom * bh))
+    return x0, y0, x1, y1
+
+
 def compute_homography(corners: Corners, orientation: Orientation = Orientation.R0) -> np.ndarray:
     """Homography mapping canonical board coords (u, v) -> image pixels (x, y)."""
     keys = ORIENTATION_TO_KEYS[orientation]
