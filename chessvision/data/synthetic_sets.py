@@ -142,7 +142,8 @@ class _SyntheticKeypointBase(Dataset):
             rgb, boxes, keypoints = augment_targets(
                 rgb, boxes, keypoints,
                 hflip_prob=self.config.hflip_prob, jitter=self.config.jitter,
-                color=self.config.color, blur=self.config.blur, noise=self.config.noise,
+                color=self.config.color, blur=self.config.blur,
+                motion_blur=self.config.motion_blur, noise=self.config.noise,
             )  # fmt: skip
         return _to_tensor_target(rgb, boxes, labels, keypoints, image_id)
 

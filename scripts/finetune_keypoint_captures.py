@@ -91,7 +91,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Appearance-only corruptions (image alone; targets untouched). Default off so behaviour
     # is unchanged unless requested. Simulate real capture variance without a render domain gap.
     add("--aug-color", type=float, default=0.0, help="per-channel gain / white-balance (e.g. 0.1)")
-    add("--aug-blur", type=float, default=0.0, help="max blur sigma px, motion/DoF (e.g. 1.0)")
+    add("--aug-blur", type=float, default=0.0, help="max Gaussian blur sigma px, DoF (e.g. 1.0)")
+    add("--aug-motion-blur", type=float, default=0.0, help="max motion-blur length px (e.g. 5)")
     add("--aug-noise", type=float, default=0.0, help="max noise std /255, low-light (e.g. 0.03)")
     add("--workers", type=int, default=4)
     add("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -148,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         jitter=args.jitter,
         color=args.aug_color,
         blur=args.aug_blur,
+        motion_blur=args.aug_motion_blur,
         noise=args.aug_noise,
     )
 

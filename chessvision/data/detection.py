@@ -70,7 +70,8 @@ class DetectionConfig:
     # Appearance-only corruptions (image untouched targets); each magnitude is a cap sampled
     # from zero, so a share of frames stay near-clean. See augment_targets.
     color: float = 0.0  # per-channel gain magnitude (white-balance / board-colour drift)
-    blur: float = 0.0  # max Gaussian blur sigma in px (motion / depth-of-field softening)
+    blur: float = 0.0  # max Gaussian blur sigma in px (depth-of-field softening)
+    motion_blur: float = 0.0  # max linear motion-blur kernel length px (directional camera shake)
     noise: float = 0.0  # max additive Gaussian noise std as a fraction of 255 (low-light grain)
 
 
@@ -97,6 +98,18 @@ def resize_targets(
     return rgb, boxes * scale, keypoints
 
 
+def _motion_blur_kernel(length: int, angle_deg: float) -> np.ndarray:
+    """Normalized linear motion-blur kernel: a `length`-px streak rotated to `angle_deg`.
+    Models directional camera shake (the real blur here is shake, not defocus)."""
+    kernel = np.zeros((length, length), dtype=np.float32)
+    kernel[length // 2, :] = 1.0  # horizontal streak
+    center = ((length - 1) / 2.0, (length - 1) / 2.0)
+    m = cv2.getRotationMatrix2D(center, angle_deg, 1.0)
+    kernel = cv2.warpAffine(kernel, m, (length, length))
+    s = float(kernel.sum())
+    return kernel / s if s > 0 else kernel
+
+
 def augment_targets(
     rgb: np.ndarray,
     boxes: np.ndarray,
@@ -106,6 +119,7 @@ def augment_targets(
     jitter: float,
     color: float = 0.0,
     blur: float = 0.0,
+    motion_blur: float = 0.0,
     noise: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     """Train-time augmentation. Shared by the ChessReD, capture, and synthetic datasets.
@@ -144,6 +158,11 @@ def augment_targets(
         sigma = torch.rand(1).item() * blur
         if sigma > 0.1:  # skip near-zero (cv2 no-op cost)
             rgb = cv2.GaussianBlur(rgb, (0, 0), sigmaX=sigma)
+    if motion_blur:
+        length = int(round(torch.rand(1).item() * motion_blur))
+        if length >= 2:
+            kernel = _motion_blur_kernel(length, torch.rand(1).item() * 360.0)
+            rgb = cv2.filter2D(rgb, -1, kernel)
     if noise:
         std = torch.rand(1).item() * noise * 255.0
         if std > 0.5:
@@ -241,6 +260,7 @@ class ChessReDDetection(Dataset):
             jitter=self.config.jitter,
             color=self.config.color,
             blur=self.config.blur,
+            motion_blur=self.config.motion_blur,
             noise=self.config.noise,
         )
 

@@ -93,6 +93,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--max-size", type=int, default=1333)
     add("--hflip", type=float, default=0.5)
     add("--jitter", type=float, default=0.1)
+    # Appearance-only aug (image alone), applied to BOTH domains' train sets. Default off.
+    add("--aug-color", type=float, default=0.0, help="per-channel gain / white-balance (e.g. 0.1)")
+    add("--aug-blur", type=float, default=0.0, help="max Gaussian blur sigma px (e.g. 1.0)")
+    add("--aug-motion-blur", type=float, default=0.0, help="max motion-blur length px (e.g. 5)")
+    add("--aug-noise", type=float, default=0.0, help="max noise std /255, low-light (e.g. 0.03)")
     add("--workers", type=int, default=4)
     add("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     add("--amp", action="store_true")
@@ -105,11 +110,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def build_datasets(args):
     """Build the ChessReD-train and store-(train/val/test) keypoint datasets + the ChessReD
     val image ids. Train configs augment; eval configs do not."""
+    aug = dict(
+        color=args.aug_color,
+        blur=args.aug_blur,
+        motion_blur=args.aug_motion_blur,
+        noise=args.aug_noise,
+    )
     cfg_train = CaptureKeypointConfig(
-        max_size=args.max_size, hflip_prob=args.hflip, jitter=args.jitter
+        max_size=args.max_size, hflip_prob=args.hflip, jitter=args.jitter, **aug
     )
     cr_train_cfg = DetectionConfig(
-        max_size=args.max_size, hflip_prob=args.hflip, jitter=args.jitter
+        max_size=args.max_size, hflip_prob=args.hflip, jitter=args.jitter, **aug
     )
 
     chessred = ChessReD.load(args.data_root, args.images_root)

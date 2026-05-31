@@ -163,6 +163,7 @@ class CaptureKeypointDetection(Dataset):
                 jitter=self.config.jitter,
                 color=self.config.color,
                 blur=self.config.blur,
+                motion_blur=self.config.motion_blur,
                 noise=self.config.noise,
             )
 
