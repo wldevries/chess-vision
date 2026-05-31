@@ -22,6 +22,7 @@ import numpy as np
 from chessvision.geometry import (
     CornerDict,
     Orientation,
+    board_crop_bbox,
     compute_homography,
     order_corners,
     quad_area,
@@ -182,18 +183,22 @@ class LivePredictor:
         self.score_thresh = score_thresh
         self.tol = tol
         self._model = None
+        self._crop: dict = {}  # board-crop config read from the checkpoint (empty = no crop)
 
     def _ensure_loaded(self):
         if self._model is not None:
             return
         import torch
 
-        from chessvision.keypoint_detector import load_keypoint_detector
+        from chessvision.keypoint_detector import load_keypoint_detector, read_keypoint_preprocess
 
         if not self.ckpt.exists():
             raise FileNotFoundError(f"keypoint checkpoint not found: {self.ckpt}")
         self._device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._model = load_keypoint_detector(self.ckpt, self._device)
+        # Match the framing the model trained on: a crop-trained checkpoint records its crop
+        # config, so live inference slices the same way (else scale-shift, as in the eval path).
+        self._crop = read_keypoint_preprocess(self.ckpt)
 
     @property
     def device(self) -> str:
@@ -203,19 +208,36 @@ class LivePredictor:
     def predict(self, rgb: np.ndarray, corners_in) -> PredictionResult:
         """Detect pieces in `rgb` (H, W, 3 uint8) and map contacts -> squares -> FEN.
 
-        `corners_in` is 4 image points in any order (sorted internally). Runs the
-        net once at full resolution; the homography is built from the same full-res
-        corners so detections and H share one coordinate frame.
+        `corners_in` is 4 image points in any order (sorted internally). A crop-trained
+        checkpoint (recorded in its metadata) slices the frame to the board bbox first and
+        the predicted contact points are translated back to full-frame pixels, so the
+        homography (built from the full-frame corners) and the points share one frame.
         """
         import torch
 
         self._ensure_loaded()
         arr = np.ascontiguousarray(rgb)
+        ox, oy = 0.0, 0.0
+        if self._crop.get("board_crop"):
+            corners = corners_in if isinstance(corners_in, dict) else order_corners(corners_in)
+            h, w = arr.shape[:2]
+            x0, y0, x1, y1 = board_crop_bbox(
+                corners,
+                w,
+                h,
+                side=self._crop.get("crop_side", 0.12),
+                top=self._crop.get("crop_top", 0.30),
+                bottom=self._crop.get("crop_bottom", 0.08),
+            )
+            arr = np.ascontiguousarray(arr[y0:y1, x0:x1])
+            ox, oy = float(x0), float(y0)
         t = torch.from_numpy(arr).permute(2, 0, 1).float().div(255).to(self._device)
         with torch.no_grad():
             out = self._model([t])[0]
         keep = out["scores"] >= self.score_thresh
         points = out["keypoints"][keep][:, 0, :2].cpu().numpy()
+        points[:, 0] += ox  # crop frame -> full-frame, to match the full-frame corners/homography
+        points[:, 1] += oy
         labels = out["labels"][keep].cpu().tolist()
         scores = out["scores"][keep].cpu().tolist()
         return build_prediction(corners_in, points, labels, scores, tol=self.tol)
