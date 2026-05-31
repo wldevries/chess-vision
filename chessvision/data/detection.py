@@ -67,6 +67,11 @@ class DetectionConfig:
     max_size: int = 1333  # long-side cap in pixels; boxes scaled to match
     hflip_prob: float = 0.0  # train-time horizontal flip probability
     jitter: float = 0.0  # train-time brightness/contrast jitter magnitude (0 disables)
+    # Appearance-only corruptions (image untouched targets); each magnitude is a cap sampled
+    # from zero, so a share of frames stay near-clean. See augment_targets.
+    color: float = 0.0  # per-channel gain magnitude (white-balance / board-colour drift)
+    blur: float = 0.0  # max Gaussian blur sigma in px (motion / depth-of-field softening)
+    noise: float = 0.0  # max additive Gaussian noise std as a fraction of 255 (low-light grain)
 
 
 def collate_detection(batch):
@@ -99,9 +104,22 @@ def augment_targets(
     *,
     hflip_prob: float,
     jitter: float,
+    color: float = 0.0,
+    blur: float = 0.0,
+    noise: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """Train-time horizontal flip + photometric jitter, mirroring boxes/keypoints on
-    the same flip draw. Shared by the ChessReD and capture datasets."""
+    """Train-time augmentation. Shared by the ChessReD, capture, and synthetic datasets.
+
+    Geometric (mirrors boxes/keypoints): horizontal flip. Appearance-only (image alone --
+    the targets need no transform, so this is automatically "detection-safe"): brightness/
+    contrast `jitter`, per-channel `color` gain (white-balance / board-colour drift), Gaussian
+    `blur` (sigma ~U(0, blur) px -- motion / depth-of-field softening), additive Gaussian
+    `noise` (std ~U(0, noise)*255 -- low-light sensor grain). Each appearance magnitude is
+    sampled from zero up to its cap, so a share of frames stay near-clean; the corruptions are
+    unconditional (not content-aware -- an already-soft frame may be blurred further, which is
+    fine at these light caps). JPEG aug is deliberately omitted: a live camera feed is not
+    re-encoded, so block artifacts never occur in deployment.
+    """
     if hflip_prob and torch.rand(1).item() < hflip_prob:
         rgb = np.ascontiguousarray(rgb[:, ::-1])
         w = rgb.shape[1]
@@ -118,6 +136,19 @@ def augment_targets(
         alpha = 1.0 + (torch.rand(1).item() * 2 - 1) * jitter  # contrast
         beta = (torch.rand(1).item() * 2 - 1) * jitter * 255.0  # brightness
         rgb = np.clip(rgb.astype(np.float32) * alpha + beta, 0, 255).astype(np.uint8)
+    if color:
+        # independent per-channel gain: simulates white-balance / board-colour variation
+        gains = 1.0 + (torch.rand(3).numpy() * 2 - 1) * color
+        rgb = np.clip(rgb.astype(np.float32) * gains, 0, 255).astype(np.uint8)
+    if blur:
+        sigma = torch.rand(1).item() * blur
+        if sigma > 0.1:  # skip near-zero (cv2 no-op cost)
+            rgb = cv2.GaussianBlur(rgb, (0, 0), sigmaX=sigma)
+    if noise:
+        std = torch.rand(1).item() * noise * 255.0
+        if std > 0.5:
+            field = torch.randn(*rgb.shape).numpy() * std
+            rgb = np.clip(rgb.astype(np.float32) + field, 0, 255).astype(np.uint8)
     return rgb, boxes, keypoints
 
 
@@ -203,7 +234,14 @@ class ChessReDDetection(Dataset):
         self, rgb: np.ndarray, boxes: np.ndarray, keypoints: np.ndarray | None = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
         return augment_targets(
-            rgb, boxes, keypoints, hflip_prob=self.config.hflip_prob, jitter=self.config.jitter
+            rgb,
+            boxes,
+            keypoints,
+            hflip_prob=self.config.hflip_prob,
+            jitter=self.config.jitter,
+            color=self.config.color,
+            blur=self.config.blur,
+            noise=self.config.noise,
         )
 
 

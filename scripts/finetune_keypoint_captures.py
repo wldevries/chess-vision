@@ -87,7 +87,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--weight-decay", type=float, default=1e-2)
     add("--max-size", type=int, default=1333)
     add("--hflip", type=float, default=0.5)
-    add("--jitter", type=float, default=0.1)
+    add("--jitter", type=float, default=0.1, help="brightness/contrast jitter magnitude")
+    # Appearance-only corruptions (image alone; targets untouched). Default off so behaviour
+    # is unchanged unless requested. Simulate real capture variance without a render domain gap.
+    add("--aug-color", type=float, default=0.0, help="per-channel gain / white-balance (e.g. 0.1)")
+    add("--aug-blur", type=float, default=0.0, help="max blur sigma px, motion/DoF (e.g. 1.0)")
+    add("--aug-noise", type=float, default=0.0, help="max noise std /255, low-light (e.g. 0.03)")
     add("--workers", type=int, default=4)
     add("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     add("--amp", action="store_true")
@@ -137,7 +142,14 @@ def main(argv: list[str] | None = None) -> int:
     device = torch.device(args.device)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = CaptureKeypointConfig(max_size=args.max_size, hflip_prob=args.hflip, jitter=args.jitter)
+    cfg = CaptureKeypointConfig(
+        max_size=args.max_size,
+        hflip_prob=args.hflip,
+        jitter=args.jitter,
+        color=args.aug_color,
+        blur=args.aug_blur,
+        noise=args.aug_noise,
+    )
 
     # Split manifest helper: exact per-bucket membership by id/session/path, so "which images
     # were in train/val/test" is answerable from disk, not re-derived from args + data state.

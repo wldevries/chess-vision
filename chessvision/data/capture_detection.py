@@ -161,6 +161,9 @@ class CaptureKeypointDetection(Dataset):
                 keypoints,
                 hflip_prob=self.config.hflip_prob,
                 jitter=self.config.jitter,
+                color=self.config.color,
+                blur=self.config.blur,
+                noise=self.config.noise,
             )
 
         image = torch.from_numpy(np.ascontiguousarray(rgb)).permute(2, 0, 1).float() / 255.0
