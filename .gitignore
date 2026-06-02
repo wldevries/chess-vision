@@ -16,6 +16,10 @@ models/*.onnx
 # Self-check / experiment outputs
 runs/
 
+# Ultralytics auto-downloads bare COCO-pretrained weights into CWD; re-fetched on
+# demand, so don't commit them (our trained checkpoints live under runs/, ignored above).
+yolo*.pt
+
 # Local environment config
 .env
 
