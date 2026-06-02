@@ -721,6 +721,7 @@ def select_corner_dataset_poses(
     dedup_thr: float = 0.02,
     max_per_pose: int = 2,
     val_frac: float = 0.25,
+    test_boards: Sequence[str] = (),
 ) -> tuple[list[CornerLabel], list[CornerLabel]]:
     """Split labelled corner photos into (train, held-out), holding out whole poses.
 
@@ -731,9 +732,13 @@ def select_corner_dataset_poses(
     deterministic `val_frac` share of each board's poses is held out; the rest train
     (thinned to `max_per_pose` evenly-spaced frames). A final anti-leak pass drops any
     train pose within `dedup_thr` of a held-out one.
+
+    `test_boards` are dropped from BOTH train and the held-out split (kept fully unseen,
+    e.g. dennis, so they stay an honest generalization probe measured separately).
     """
     store = store if isinstance(store, CornerStore) else CornerStore(store)
-    samples = store.samples()
+    test_set = set(test_boards)
+    samples = [s for s in store.samples() if (s.board or "(untagged)") not in test_set]
     clusters = _cluster_by_corners(samples, dedup_thr)
 
     by_board: dict[str, list[list]] = defaultdict(list)

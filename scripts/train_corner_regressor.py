@@ -42,6 +42,7 @@ from chessvision.data.corners import (
     NUM_CORNERS,
     NUM_LATTICE,
     CaptureCorners,
+    ChesscogCorners,
     ChessReDCorners,
     CornerConfig,
     LatticeTargets,
@@ -115,8 +116,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # held-out poses become the `cds_*` eval and the checkpoint-selection metric when
     # present -- the larger, viewpoint-diverse "works on your boards" number. See
     # chessvision/data/corner_capture.py and corner-capture-mode.md.
-    add("--corners-root", type=Path, default=Path("data/corners"), help="corner-dataset root")
+    add("--corners-root", type=Path, default=Path("data"), help="unified store root (data/ "
+        "-> data/store; captures+corners are merged here post-restructure)")
     add("--no-corner-ds", action="store_true", help="ignore the standalone corner dataset")
+    add(
+        "--cds-test-board",
+        action="append",
+        default=[],
+        help="board tag held fully out of corner-ds train+eval (unseen probe, e.g. "
+        "dennis-bord); repeatable. Measure it separately with eval_cell_assignment.",
+    )
+    # Chesscog synthetic corners -- a SMALL viewpoint-diversity dose (off by default).
+    # Corner localization is geometric, so chesscog's render-bias (which hurts the piece
+    # model) is harmless here; it adds oblique-pose variety the real boards lack. Keep the
+    # dose small (it's samey, no weird edges): --chesscog-n caps how many of its 4400 train
+    # images mix in. Train-only -- never an eval target (not one of the user's boards).
+    add("--chesscog-root", type=Path, default=Path("data/othersets/Chesscog"))
+    add("--chesscog-n", type=int, default=0, help="# chesscog train images to mix in (0 = off)")
     return p.parse_args(argv)
 
 
@@ -182,6 +198,7 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
                 dedup_thr=args.dedup_thr,
                 max_per_pose=args.max_per_pose,
                 val_frac=args.val_frac,
+                test_boards=args.cds_test_board,
             )
             cds_train_ds = CornerCaptureDataset(cds_train, store, train_cfg, train=True)
             corner_ds_eval_ds = CornerCaptureDataset(cds_heldout, store, eval_cfg, train=False)
@@ -193,6 +210,16 @@ def build_loaders(args: argparse.Namespace, chessred: ChessReD):
                 f"corner-ds: +{len(cds_train)} train frames ({n_train_poses} poses) | "
                 f"{len(cds_heldout)} held-out frames ({n_heldout_poses} poses)"
             )
+
+    # Chesscog: a small synthetic viewpoint-diversity dose, train-only (no eval target).
+    if args.chesscog_n and args.chesscog_root.exists():
+        cc_train = ChesscogCorners(
+            args.chesscog_root, "train", config=train_cfg, train=True,
+            limit=args.chesscog_n, seed=args.seed,
+        )  # fmt: skip
+        train_parts.append(cc_train)
+        datasets.append(cc_train)
+        print(f"chesscog: +{len(cc_train)} train frames (synthetic viewpoint dose)")
 
     train_ds: object = train_parts[0] if len(train_parts) == 1 else ConcatDataset(train_parts)
 

@@ -29,6 +29,7 @@ are free of game-level leakage and comparable across phases.
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -460,6 +461,66 @@ def select_capture_corner_poses(
     train_clusters = _cluster_by_corners(train_pool, dedup_thr, exclude=heldout_centroids)
     train = [s for cluster in train_clusters for s in _sample_evenly(cluster, max_per_pose)]
     return train, heldout
+
+
+# --------------------------------------------------------------------------- #
+# Chesscog corners (synthetic, viewpoint-diversity dose)
+# --------------------------------------------------------------------------- #
+#
+# Chesscog is a Blender-rendered set with per-image board `corners` (4 unnamed
+# pixel points). For the PIECE/keypoint model synthetic data hurt (render-bias on
+# appearance -- see synthetic-pretrain-hurt), but corner localization is a pure
+# *geometric* task: chesscog's value is oblique-viewpoint diversity, and its samey
+# appearance / lack of weird edges barely matters. Used only as a SMALL training
+# dose to widen the perspective prior (diag showed dennis error is a smooth global
+# perspective bias, not outliers). Never an eval target -- it's not one of the
+# user's boards.
+
+
+class ChesscogCorners(_CornerDataset):
+    """Chesscog board corners as a corner-regression dataset (visual TL/TR/BR/BL slots).
+
+    Reads ``<root>/<split>/*.json`` (each has a 4-point ``corners`` list, like
+    ``synthetic_sets.ChesscogKeypointDetection`` but corner-only). ``order_corners``
+    canonicalizes to visual slots, so orientation is irrelevant here. Use ``limit``
+    (a deterministic subsample) to keep the dose small.
+    """
+
+    def __init__(
+        self,
+        root: str | Path,
+        split: str = "train",
+        config: CornerConfig | None = None,
+        train: bool = False,
+        limit: int | None = None,
+        seed: int = 0,
+    ):
+        super().__init__(config, train)
+        self.paths = sorted(Path(root, split).glob("*.json"))
+        if not self.paths:
+            raise FileNotFoundError(f"no chesscog labels under {Path(root, split)}")
+        if limit is not None and limit < len(self.paths):
+            # deterministic even subsample (np default_rng for reproducibility)
+            idx = np.sort(np.random.default_rng(seed).choice(len(self.paths), limit, replace=False))
+            self.paths = [self.paths[i] for i in idx]
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def _image_id(self, idx: int) -> int:
+        return idx
+
+    def _load_raw(self, idx: int) -> tuple[np.ndarray, np.ndarray, tuple[int, int]]:
+        label_path = self.paths[idx]
+        d = json.loads(label_path.read_text(encoding="utf-8"))
+        bgr = cv2.imread(str(label_path.with_suffix(".png")), cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise FileNotFoundError(f"could not read image {label_path.with_suffix('.png')}")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h0, w0 = rgb.shape[:2]
+        pts = corners_to_array({i: c for i, c in enumerate(d["corners"])})
+        pts = pts / np.array([w0, h0], dtype=np.float32)
+        return rgb, pts, (w0, h0)
 
 
 class CaptureCorners(_CornerDataset):
