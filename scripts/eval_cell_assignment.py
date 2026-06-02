@@ -41,13 +41,13 @@ from chessvision.geometry import (
 SQUARES = [f"{f}{r}" for r in range(1, 9) for f in FILES]
 
 
-def eval_image(model, rgb, gt_corners, device, predict):
-    pred = predict(model, rgb, device)
-    h_gt = compute_homography(gt_corners)
-    h_pred = compute_homography(pred)
-    centers = np.array([square_center_uv(s) for s in SQUARES], dtype=np.float32)
-    img_pts = canonical_to_image(h_gt, centers)  # where each center sits in the image
-    uv_pred = image_to_canonical(h_pred, img_pts)  # read back through predicted H
+# Visual-slot ring (closed): a 90 deg board rotation cyclically shifts these.
+RING = ("top_left", "top_right", "bottom_right", "bottom_left")
+
+
+def _cell_metrics(pred, img_pts, centers):
+    """(square-acc, mean disp, worst disp, all-64-ok) for one predicted corner dict."""
+    uv_pred = image_to_canonical(compute_homography(pred), img_pts)  # read back through pred H
     correct = 0
     disp_sq = 0.0
     worst = 0.0
@@ -58,6 +58,32 @@ def eval_image(model, rgb, gt_corners, device, predict):
         if uv_to_square(float(u), float(v)) == sq:
             correct += 1
     return correct / 64.0, disp_sq / 64.0, worst, correct == 64
+
+
+def eval_image(model, rgb, gt_corners, device, predict, rotation_invariant=True):
+    """Cell-assignment error for one image.
+
+    Deployment orientation is a MANUAL 4-way toggle (which physical corner is a8 is not
+    geometry-recoverable -- see live-read mode), so the deployment-relevant number is the
+    BEST of the 4 board rotations. Without this, a near-DIAMOND board (where the visual-slot
+    canonicalization `order_corners` flips which corner is "top-left") is scored as a
+    catastrophic 90 deg-rotated homography even though all 4 corners are localized correctly.
+    `rotation_invariant=True` (default) takes the best readable rotation; pass False for the
+    raw fixed-slot number.
+    """
+    pred = predict(model, rgb, device)
+    h_gt = compute_homography(gt_corners)
+    centers = np.array([square_center_uv(s) for s in SQUARES], dtype=np.float32)
+    img_pts = canonical_to_image(h_gt, centers)  # where each center sits in the image
+    if not rotation_invariant:
+        return _cell_metrics(pred, img_pts, centers)
+    ring = [pred[k] for k in RING]
+    cands = [
+        _cell_metrics({RING[i]: ring[(i + r) % 4] for i in range(4)}, img_pts, centers)
+        for r in range(4)
+    ]
+    # The user toggles to the orientation that reads correctly: most squares right, then min disp.
+    return min(cands, key=lambda t: (-t[0], t[1]))
 
 
 def main() -> int:
@@ -73,6 +99,9 @@ def main() -> int:
     p.add_argument("--all-frames", action="store_true", help="score every labelled frame, not just "
                    "the held-out pose split (use for a board the ckpt never trained on)")
     p.add_argument("--board", default=None, help="restrict to one board tag")
+    p.add_argument("--fixed-slots", action="store_true", help="raw fixed visual-slot metric "
+                   "(default is rotation-invariant: best of 4 board rotations, matching the "
+                   "manual orientation toggle in deployment)")
     args = p.parse_args()
 
     device = torch.device(args.device)
@@ -99,7 +128,9 @@ def main() -> int:
         bgr = cv2.imread(str(store.store / s.image), cv2.IMREAD_COLOR)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         gt = {k: list(v) for k, v in s.corners.items()}
-        acc, disp, worst, ok = eval_image(model, rgb, gt, device, predict)
+        acc, disp, worst, ok = eval_image(
+            model, rgb, gt, device, predict, rotation_invariant=not args.fixed_slots
+        )
         orient = "portrait" if s.width < s.height else "landscape"
         for key in (s.board or "(untagged)", f"  {s.board} [{orient}]"):
             r = rows[key]
@@ -108,7 +139,8 @@ def main() -> int:
             r["worst"].append(worst)
             r["ok"].append(ok)
 
-    print(f"ckpt={args.ckpt}  held-out images={len(heldout)}")
+    mode = "fixed-slot" if args.fixed_slots else "rotation-invariant (best of 4)"
+    print(f"ckpt={args.ckpt}  held-out images={len(heldout)}  metric={mode}")
     hdr = f"{'board':24s} {'n':>3} {'square-acc':>10} {'cell-disp':>10} {'worst-disp':>10}"
     print(f"{hdr} {'board-ok':>9}")
     # boards first (no leading spaces), then the orientation sub-rows
