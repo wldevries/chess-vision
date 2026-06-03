@@ -16,7 +16,15 @@
       #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
       input[type="file"] { display: none; }
       .panel { display: grid; grid-template-columns: auto 1fr; gap: var(--gap); align-items: start; margin-top: var(--gap); }
-      #board { font-size: 2rem; line-height: 1.05; font-family: "Segoe UI Symbol", "Noto Sans Symbols2", serif; white-space: pre; user-select: none; }
+      #board { display: grid; grid-template-columns: repeat(8, 1fr); width: min(320px, 78vw); aspect-ratio: 1; border: 1px solid #888; border-radius: 4px; overflow: hidden; user-select: none; }
+      #board .sq { position: relative; display: flex; align-items: center; justify-content: center; aspect-ratio: 1; font-size: 1.8rem; line-height: 1; font-family: "Segoe UI Symbol", "Noto Sans Symbols2", serif; }
+      #board .coord { position: absolute; font-size: 0.62rem; line-height: 1; font-family: system-ui, sans-serif; font-weight: 600; text-shadow: none; pointer-events: none; }
+      #board .coord.rank { left: 2px; top: 1px; }
+      #board .coord.file { right: 2px; bottom: 1px; }
+      #board .sq.light { background: #eccfa5; }
+      #board .sq.dark { background: #b58863; }
+      #board .sq.w { color: #fafafa; text-shadow: 0 0 2px #000, 0 0 2px #000; }
+      #board .sq.b { color: #111; text-shadow: 0 0 2px #fff; }
       .meta { display: flex; flex-direction: column; gap: 8px; }
       #fen { font-family: ui-monospace, monospace; font-size: 0.9rem; word-break: break-all; padding: 8px; border: 1px dashed var(--line); border-radius: 8px; }
       .orient { font-size: 0.9rem; opacity: 0.85; }
@@ -48,7 +56,7 @@
     </div>
 
     <div class="panel">
-      <div id="board" aria-label="board state">·</div>
+      <div id="board" aria-label="board state"></div>
       <div class="meta">
         <div class="orient">
           Orientation: <b id="orient">0</b>/3

@@ -200,18 +200,39 @@ function fenBoard(board) {
   return rows.join("/");
 }
 
-function unicodeBoard(board) {
-  const lines = [];
+// Render the board as a fixed 8x8 grid of cells (NOT text -- chess glyphs and '·' have
+// different advance widths, so a monospace text grid never aligns).
+function renderBoardGrid(board) {
+  const el = $("board");
+  el.textContent = "";
   for (let r = 8; r >= 1; r--) {
-    let line = "";
     for (let f = 0; f < 8; f++) {
       const sq = `${FILES[f]}${r}`;
-      line += sq in board ? UNICODE[PIECE_FEN[board[sq]]] : "·";
-      line += " ";
+      const cell = document.createElement("div");
+      const dark = (f + r) % 2 === 1; // a1 (0+1) dark, a8 light -- real board colours
+      cell.className = "sq " + (dark ? "dark" : "light");
+      if (sq in board) {
+        const cls = board[sq];
+        cell.classList.add(cls < 6 ? "w" : "b");
+        const g = document.createElement("span");
+        g.textContent = UNICODE[PIECE_FEN[cls]];
+        cell.appendChild(g); // span so coord labels below aren't wiped by textContent
+      }
+      // Coordinates (lichess-style, opposite-tone): ranks down the a-file, files along rank 1.
+      const tone = dark ? "#eccfa5" : "#b58863";
+      if (f === 0) cell.appendChild(coordLabel("rank", r, tone));
+      if (r === 1) cell.appendChild(coordLabel("file", FILES[f], tone));
+      el.appendChild(cell);
     }
-    lines.push(line.trimEnd());
   }
-  return lines.join("\n");
+}
+
+function coordLabel(kind, text, color) {
+  const s = document.createElement("span");
+  s.className = "coord " + kind;
+  s.textContent = text;
+  s.style.color = color;
+  return s;
 }
 
 function drawScene() {
@@ -263,7 +284,7 @@ function renderResult() {
   const fen = `${fenBoard(b)} w - - 0 1`;
   $("fen").textContent = fen;
   $("orient").textContent = rotation;
-  $("board").textContent = unicodeBoard(b);
+  renderBoardGrid(b);
   // Lichess editor wants literal '/' rank separators and '_' for spaces (NOT %2F/%20).
   $("lichess").href = `https://lichess.org/editor/${fen.replaceAll(" ", "_")}`;
 }
@@ -365,4 +386,5 @@ $("backend").addEventListener("change", async () => {
   await loadModels();
 });
 
+renderBoardGrid({}); // show an empty, labelled board on load instead of blank space
 loadModels();
