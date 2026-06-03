@@ -7,7 +7,7 @@ board. This injects `"set"` into each row of `labels.jsonl` accordingly.
 Idempotent (keyed on board) and atomic (temp file + replace). Unknown boards abort rather
 than mistag. Back up labels.jsonl first; usage:
 
-    uv run python scripts/backfill_corner_sets.py [data/corners/store/labels.jsonl]
+    uv run python scripts/backfill_corner_sets.py [data/labels.jsonl]
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ BOARD_TO_SET = {
 
 
 def main() -> None:
-    path = Path(sys.argv[1] if len(sys.argv) > 1 else "data/corners/store/labels.jsonl")
+    path = Path(sys.argv[1] if len(sys.argv) > 1 else "data/labels.jsonl")
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     unknown = sorted({r.get("board", "") for r in rows} - BOARD_TO_SET.keys())

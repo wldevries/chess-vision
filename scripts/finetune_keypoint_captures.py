@@ -55,7 +55,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--positions-root",
         type=Path,
         default=None,
-        help="data/corners tree with in-app position labels; folded in as pos-<board> "
+        help="data/ store tree with in-app position labels; folded in as pos-<board> "
         "sessions so a whole board can be held out via --val-sessions",
     )
     add("--keypoint-ckpt", type=Path, default=Path("runs/keypoint/best.pt"))
@@ -71,7 +71,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Unified-store path (the merged corner+capture store; retires LS + the captures/positions
     # split). When --store is given it is the SINGLE source: every piece-labelled record, keyed
     # on its real session. Test = whole boards; val = pose-held-out fraction of the rest.
-    add("--store", type=Path, default=None, help="unified corner store root (e.g. data/corners); "
+    add("--store", type=Path, default=None, help="unified corner store root (e.g. data); "
         "single source when given -- ignores --captures/--positions-root/--val/test-sessions")
     add("--test-boards", default="", help="store path: comma-separated boards held out as test "
         "(whole board -> train+selection both exclude it), e.g. dennis-bord")

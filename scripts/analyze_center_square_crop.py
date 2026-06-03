@@ -12,7 +12,7 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-LABELS = Path("data/corners/store/labels.jsonl")
+LABELS = Path("data/labels.jsonl")
 
 
 def square_bounds(w: int, h: int):

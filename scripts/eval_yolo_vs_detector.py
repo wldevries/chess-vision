@@ -17,7 +17,7 @@ per-class AP is computed within each scheme, so the scalar `map` is comparable.
 
     uv sync --group yolo
     uv run --group yolo python scripts/eval_yolo_vs_detector.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --data-root "data/othersets/ChessReD" \
         --yolo-ckpt runs/yolo_detector/weights/best.pt \
         --frcnn-ckpt runs/detector/best.pt
 """

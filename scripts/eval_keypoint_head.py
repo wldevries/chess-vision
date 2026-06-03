@@ -9,7 +9,7 @@ subset — the head's value only shows on steeper real-world angles (see capture
 
 Usage:
     uv run python scripts/eval_keypoint_head.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" --device cuda
+        --data-root "data/othersets/ChessReD" --device cuda
 """
 
 from __future__ import annotations

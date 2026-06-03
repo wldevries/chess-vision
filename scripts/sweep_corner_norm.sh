@@ -13,7 +13,7 @@
 #       round(min(best),5) lo, round(max(best),5) hi FROM r GROUP BY v ORDER BY v"
 set -euo pipefail
 
-DATA_ROOT="data/Chess Recognition Dataset (ChessReD)_2_all"
+DATA_ROOT="data/othersets/ChessReD"
 COMMON=(--data-root "$DATA_ROOT" --epochs 30 --batch-size 16 --device cuda --amp)
 
 for seed in 0 1 2; do

@@ -1,15 +1,16 @@
 """A standalone board-corner dataset, fed by phone photos labelled in the app.
 
-This is the data side of the "corner-capture mode" (see ``corner-capture-mode.md``).
-It is **deliberately separate** from the capture set (`data/captures/`, Label Studio,
-piece keypoints + FEN): the corner localizer needs *viewpoints*, not positions, so the
-labels here are corner-only and there is no FEN/Label-Studio round-trip. Layout::
+This is the data side of the "corner-capture mode" (see ``docs/corner-capture-mode.md``).
+The labels are corner-only (no FEN/Label-Studio round-trip): the corner localizer needs
+*viewpoints*, not positions. The data lives in the unified flat ``data/`` tree shared with
+the captures (an earlier ``data/corners/`` split has since been merged in)::
 
-    data/corners/
-      inbox/            raw phone dumps (subfolders OK, e.g. by date); local-only
-      store/
-        images/<id>.jpg EXIF-normalized JPEG, written when you label a photo
-        labels.jsonl    one row per labelled photo (the trainable artifact)
+    data/
+      source/
+        inbox/<relpath>     raw phone dumps (subfolders OK, e.g. by date); local-only
+        <session>/<file>    capture originals (migrated in)
+      store/<relpath>       EXIF-normalized JPEG, written when you label a photo
+      labels.jsonl          one row per labelled photo (the trainable artifact)
 
 **Why normalize on label.** Phone photos carry an EXIF orientation flag; browsers and
 libraries disagree about when to apply it. So when a photo is labelled we bake the
@@ -778,7 +779,7 @@ def select_corner_dataset_poses(
 
 
 class CornerCaptureDataset(_CornerDataset):
-    """Corner dataset over labelled `data/corners` photos, emitting the same
+    """Corner dataset over labelled `data/` store photos, emitting the same
     `(image, target)` as `ChessReDCorners`. Images load from the local store
     (already EXIF-normalized); corners are stored in that same frame."""
 

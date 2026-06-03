@@ -5,7 +5,7 @@ chessred2k train/val/test split and reports COCO mAP on the val split.
 
 Usage:
     uv run python scripts/train_detector.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --data-root "data/othersets/ChessReD" \
         --epochs 12 --batch-size 2 --device cuda --amp
 
 mAP needs torchmetrics + pycocotools (`uv add torchmetrics pycocotools`); without

@@ -7,7 +7,7 @@ chosen by val keypoint square-accuracy (predicted contact point -> square).
 
 Usage:
     uv run python scripts/train_keypoint_head.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --data-root "data/othersets/ChessReD" \
         --epochs 8 --batch-size 2 --device cuda --amp
 """
 

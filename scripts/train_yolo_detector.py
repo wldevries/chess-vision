@@ -11,7 +11,7 @@ Ultralytics is AGPL-3.0; our project is GPL-3.0-or-later (compatible). It lives 
 
     uv sync --group yolo            # install ultralytics (+ its deps) once
     uv run --group yolo python scripts/train_yolo_detector.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --data-root "data/othersets/ChessReD" \
         --model yolo11s.pt --epochs 100 --imgsz 1280 --batch 8 --device 0
 
 The dataset is auto-built (hardlinks, no copy) into --yolo-dir on first run via

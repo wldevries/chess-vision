@@ -169,10 +169,10 @@ def create_app(
     # store root in the flat layout; fall back to out_root only when no store is wired.
     meta_root = Path(corners_root) if corners_root is not None else out_root
 
-    # Corner-label mode: an import-and-label flow over phone photos staged in a
-    # `data/corners/inbox/` tree, writing a standalone corner dataset (no FEN / Label
+    # Corner-label mode: an import-and-label flow over phone photos staged in the
+    # `data/source/inbox/` tree, writing corner-only labels (no FEN / Label
     # Studio). Off unless a corners root is provided; a pre-built store can be injected
-    # for tests. See chessvision/data/corner_capture.py and corner-capture-mode.md.
+    # for tests. See chessvision/data/corner_capture.py and docs/corner-capture-mode.md.
     if corner_store is None and corners_root is not None:
         from chessvision.data.corner_capture import CornerStore
 

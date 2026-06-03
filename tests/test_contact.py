@@ -12,7 +12,7 @@ from chessvision.data.chessred import ChessReD
 from chessvision.data.contact import contact_points, occluded_pieces, occlusion_score
 from chessvision.geometry import compute_homography, square_for_point, square_polygons
 
-DATA_ROOT = Path("data/Chess Recognition Dataset (ChessReD)_2_all")
+DATA_ROOT = Path("data/othersets/ChessReD")
 
 pytestmark = pytest.mark.skipif(
     not (DATA_ROOT / "annotations.json").exists(),

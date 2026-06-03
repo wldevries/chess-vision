@@ -18,7 +18,7 @@ from chessvision.data.detection import (  # noqa: E402
     collate_detection,
 )
 
-DATA_ROOT = Path("data/Chess Recognition Dataset (ChessReD)_2_all")
+DATA_ROOT = Path("data/othersets/ChessReD")
 
 pytestmark = pytest.mark.skipif(
     not (DATA_ROOT / "annotations.json").exists(),

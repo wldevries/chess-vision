@@ -20,7 +20,7 @@ ChessReD val keypoint square-acc (sanity that ChessReD didn't regress), and stor
 
 Usage:
     uv run python scripts/train_keypoint_joint.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --data-root "data/othersets/ChessReD" \
         --store data --test-boards dennis-bord \
         --device cuda --amp --epochs 12 --mix 0.5
 """

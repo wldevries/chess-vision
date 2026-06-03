@@ -18,7 +18,7 @@ from chessvision.data.corners import (  # noqa: E402
     corners_to_array,
 )
 
-DATA_ROOT = Path("data/Chess Recognition Dataset (ChessReD)_2_all")
+DATA_ROOT = Path("data/othersets/ChessReD")
 
 pytestmark = pytest.mark.skipif(
     not (DATA_ROOT / "annotations.json").exists(),

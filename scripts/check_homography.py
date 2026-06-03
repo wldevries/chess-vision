@@ -6,7 +6,7 @@ validates Approach A (plan.md section 4) on real data before any training.
 
 Usage:
     uv run python scripts/check_homography.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --data-root "data/othersets/ChessReD" \
         --offset-sweep --worst-n 20
 
 Outputs (under --out-dir): summary.json, per_image.csv, mismatches.csv,

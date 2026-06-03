@@ -61,7 +61,7 @@ def heatmaps_for(model, rgb, device):
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", default="runs/corners/best.pt")
-    p.add_argument("--corners-root", default="data/corners")
+    p.add_argument("--corners-root", default="data")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--out", default="runs/corners/viz_lattice_channels.png")
     p.add_argument("--max-tries", type=int, default=20)

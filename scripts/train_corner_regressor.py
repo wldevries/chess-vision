@@ -9,7 +9,7 @@ toggle downstream either way -- see `chessvision.data.corners`.
 
 Usage:
     uv run python scripts/train_corner_regressor.py \
-        --data-root "data/Chess Recognition Dataset (ChessReD)_2_all" \
+        --data-root "data/othersets/ChessReD" \
         --epochs 40 --batch-size 16 --device cuda --amp
 
 The headline metric is **mean per-corner error** as a fraction of image size
@@ -115,7 +115,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Standalone corner dataset (phone photos labelled in the app, corner-only). Its
     # held-out poses become the `cds_*` eval and the checkpoint-selection metric when
     # present -- the larger, viewpoint-diverse "works on your boards" number. See
-    # chessvision/data/corner_capture.py and corner-capture-mode.md.
+    # chessvision/data/corner_capture.py and docs/corner-capture-mode.md.
     add("--corners-root", type=Path, default=Path("data"), help="unified store root (data/ "
         "-> data/store; captures+corners are merged here post-restructure)")
     add("--no-corner-ds", action="store_true", help="ignore the standalone corner dataset")

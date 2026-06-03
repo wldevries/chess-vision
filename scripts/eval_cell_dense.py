@@ -54,7 +54,7 @@ def bucket(n):
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--ckpt", default="runs/corners_lattice/l384/best.pt")
-    p.add_argument("--data-root", default="data/Chess Recognition Dataset (ChessReD)_2_all")
+    p.add_argument("--data-root", default="data/othersets/ChessReD")
     p.add_argument("--min-pieces", type=int, default=16)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--splits", nargs="+", default=["val", "test"])

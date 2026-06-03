@@ -4,7 +4,7 @@
 # fixed seed, each to its own out-dir. Compare cap_mean / cap_worst across them.
 set -euo pipefail
 
-DATA_ROOT="data/Chess Recognition Dataset (ChessReD)_2_all"
+DATA_ROOT="data/othersets/ChessReD"
 COMMON=(--data-root "$DATA_ROOT" --epochs 40 --batch-size 16 --device cuda --amp --seed 0)
 OFF_COLOR=(--hue 0 --saturation 0 --grayscale-prob 0)
 OFF_GEOM=(--rotate 0 --scale 0 --perspective 0)

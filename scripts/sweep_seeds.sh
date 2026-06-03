@@ -5,7 +5,7 @@
 # error bar that tells us which differences are real.
 set -euo pipefail
 
-DATA_ROOT="data/Chess Recognition Dataset (ChessReD)_2_all"
+DATA_ROOT="data/othersets/ChessReD"
 COMMON=(--data-root "$DATA_ROOT" --epochs 40 --batch-size 16 --device cuda --amp)
 SEEDS=(0 1 2 3 4)
 OUT="runs/corners_seeds"

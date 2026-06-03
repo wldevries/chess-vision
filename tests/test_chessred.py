@@ -8,7 +8,7 @@ import pytest
 
 from chessvision.data.chessred import ChessReD
 
-DATA_ROOT = Path("data/Chess Recognition Dataset (ChessReD)_2_all")
+DATA_ROOT = Path("data/othersets/ChessReD")
 
 pytestmark = pytest.mark.skipif(
     not (DATA_ROOT / "annotations.json").exists(),

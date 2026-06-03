@@ -9,7 +9,7 @@ through `CornerLabel.from_row -> to_row` so every row gets the canonical field o
 Idempotent (recomputes from EXIF + reassigns deterministically) and atomic (temp + replace).
 Rows whose inbox original is missing keep whatever they had and are reported. Usage:
 
-    uv run python scripts/backfill_corner_exif_sessions.py [--corners-root data/corners]
+    uv run python scripts/backfill_corner_exif_sessions.py [--corners-root data]
                                                            [--gap-minutes 20] [--dry-run]
 """
 

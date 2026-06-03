@@ -1,4 +1,4 @@
-"""Per-board piece eval on the in-app POSITION labels (data/corners), not captures.
+"""Per-board piece eval on the in-app POSITION labels (data/ store), not captures.
 
 Every corner photo now also carries piece keypoints (the /positions tool projects a
 known FEN through the homography, user nudges each base). `position_samples_as_captures`
