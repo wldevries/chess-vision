@@ -60,6 +60,9 @@ dev = [
     "ruff>=0.6,<0.13",
 ]
 yolo = [
+    "onnx>=1.21.0",
+    "onnxruntime>=1.26.0",
+    "onnxslim>=0.1.94",
     "ultralytics>=8.3,<9",
 ]
 
