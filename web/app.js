@@ -32,15 +32,29 @@ let forcedWasm = false; // set true after an accelerator op fails at run time
 let boardR0 = null, rotation = 0;
 let scene = null; // {src, H, dets, crop, scale, padX, padY} kept for redraw on rotate
 
+const IS_MOBILE = navigator.userAgentData?.mobile
+  ?? /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+// The mobile WebGPU mis-compute is Chromium-only (Chrome/Edge/Samsung); Firefox mobile WebGPU is fine.
+const IS_CHROMIUM_MOBILE = IS_MOBILE
+  && /Chrome|Chromium|CriOS|Edg|SamsungBrowser/.test(navigator.userAgent)
+  && !/Firefox|FxiOS/.test(navigator.userAgent);
+
 // Execution-provider list for the chosen backend (always WASM-terminated as a safety net).
 // WebNN partitions the graph and runs unsupported nodes on CPU, so it degrades rather than fails.
 function epList() {
   if (forcedWasm) return ["wasm"];
+  const webnn = (deviceType) => ({ name: "webnn", deviceType, powerPreference: "high-performance" });
   switch (document.getElementById("backend").value) {
-    case "webnn-gpu": return [{ name: "webnn", deviceType: "gpu", powerPreference: "high-performance" }, "wasm"];
-    case "webnn-npu": return [{ name: "webnn", deviceType: "npu", powerPreference: "high-performance" }, "wasm"];
+    case "webgpu": return ["webgpu", "wasm"];
+    case "webnn-gpu": return [webnn("gpu"), "wasm"];
+    case "webnn-npu": return [webnn("npu"), "wasm"];
     case "wasm": return ["wasm"];
-    default: return ["webgpu", "wasm"];
+    default: // "auto": WebGPU is reliable on desktop AND on Firefox mobile, but Chromium MOBILE
+             // WebGPU SILENTLY mis-computes the corner model (soft-argmax collapses -> all 81 lattice
+             // pts pile up at image centre => "tiny board"). It's wrong results, not an error, so the
+             // runtime fallback never fires. So on Chromium-mobile only, route around WebGPU via
+             // WebNN (npu, then gpu), then WASM.
+      return IS_CHROMIUM_MOBILE ? [webnn("npu"), webnn("gpu"), "wasm"] : ["webgpu", "wasm"];
   }
 }
 
@@ -49,9 +63,15 @@ async function createSessions() {
   // creating two sessions concurrently ("another WebGPU EP inference session is being created").
   for (const s of [cornerSess, pieceSess]) { try { await s?.release?.(); } catch { /* ignore */ } }
   cornerSess = pieceSess = null;
-  const opt = { executionProviders: epList() };
-  cornerSess = await ort.InferenceSession.create("./models/corners.onnx", opt);
-  pieceSess = await ort.InferenceSession.create("./models/pieces.onnx", opt);
+  try {
+    const opt = { executionProviders: epList() };
+    cornerSess = await ort.InferenceSession.create("./models/corners.onnx", opt);
+    pieceSess = await ort.InferenceSession.create("./models/pieces.onnx", opt);
+  } catch (e) {
+    if (forcedWasm) throw e; // already on the CPU safety net -> genuinely broken
+    forcedWasm = true;       // a backend failed to even create -> drop to WASM and rebuild
+    return createSessions();
+  }
 }
 
 const backendLabel = () => (forcedWasm ? "wasm (fallback)" : document.getElementById("backend").value);
@@ -267,14 +287,32 @@ function drawScene() {
   }
   // Show the frozen annotated frame: drop the 4:3 crop so a tall still isn't clipped, let the
   // overlay flow (height by its own aspect), and hide the video.
-  $("stage").classList.remove("live");
+  enterStillMode();
+}
+
+// Switch the stage from the live video to the in-flow still canvas (shared by the plain frozen
+// frame and the annotated result).
+function enterStillMode() {
+  $("stage").classList.remove("live"); // drop the 4:3 crop so a tall still isn't clipped
   $("cam").style.display = "none";
   const ov = $("overlay");
   ov.style.position = "relative";
   ov.style.height = "auto";
 }
 
+// Freeze the captured frame immediately (before the multi-second inference) so the user sees the
+// shot they took, not the still-live feed. drawScene later repaints the same canvas with overlays.
+function showFrozen(src) {
+  const ov = $("overlay");
+  ov.width = src.width; ov.height = src.height;
+  ov.getContext("2d").drawImage(src, 0, 0);
+  enterStillMode();
+}
+
+const setBusy = (on) => { $("busy").hidden = !on; };
+
 function showLive() {
+  setBusy(false);
   $("stage").classList.add("live"); // container 4:3 -> object-fit:cover centre-crops the video
   $("cam").style.display = "block";
   const ov = $("overlay");
@@ -298,6 +336,8 @@ function renderResult() {
 async function readFrame(src, w, h) {
   if (!cornerSess || !pieceSess) return status("models not loaded — pick another backend or reload.");
   $("snap").disabled = true;
+  showFrozen(src); // freeze the shot immediately; show the spinner over it during inference
+  setBusy(true);
   try {
     status(`detecting board… (${backendLabel()})`);
     const pts = await detectCorners(src, w, h);
@@ -318,6 +358,7 @@ async function readFrame(src, w, h) {
     scene = { src, H, dets, crop, scale, padX, padY };
     drawScene();
     renderResult();
+    setBusy(false);
     $("rotate").disabled = false;
     $("resume").disabled = false;
     status(`${dets.length} pieces on ${Object.keys(boardR0).length} squares (${backendLabel()}).`);
@@ -326,8 +367,9 @@ async function readFrame(src, w, h) {
       status(`${backendLabel()} op unsupported — switching to WASM and retrying…`);
       await fallbackToWasm();
       $("snap").disabled = false;
-      return readFrame(src, w, h); // retry once on WASM
+      return readFrame(src, w, h); // retry once on WASM (it re-shows its own busy spinner)
     }
+    setBusy(false);
     status("error: " + e + "\n" + (e.stack || ""));
   } finally {
     $("snap").disabled = false;
