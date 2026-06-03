@@ -22,6 +22,7 @@ const N_ANCHORS = 33600;
 const PIECE_FEN = "PRNBQKprnbqk"; // class id 0..11 -> FEN letter
 const UNICODE = { P: "♙", R: "♖", N: "♘", B: "♗", Q: "♕", K: "♔", p: "♟", r: "♜", n: "♞", b: "♝", q: "♛", k: "♚" };
 const CROP = { side: 0.12, top: 0.3, bottom: 0.08 };
+const TARGET_AR = 4 / 3; // camera frame is centre-cropped to this (matches #cam in index.html)
 
 const $ = (id) => document.getElementById(id);
 const status = (m) => ($("status").textContent = m);
@@ -264,7 +265,9 @@ function drawScene() {
     ctx.strokeStyle = "#000"; ctx.strokeText(PIECE_FEN[d.cls], fx, fy - w / 90);
     ctx.fillStyle = "#fff"; ctx.fillText(PIECE_FEN[d.cls], fx, fy - w / 90);
   }
-  // Show the frozen annotated frame: let the overlay flow (height by its own aspect) and hide video.
+  // Show the frozen annotated frame: drop the 4:3 crop so a tall still isn't clipped, let the
+  // overlay flow (height by its own aspect), and hide the video.
+  $("stage").classList.remove("live");
   $("cam").style.display = "none";
   const ov = $("overlay");
   ov.style.position = "relative";
@@ -272,6 +275,7 @@ function drawScene() {
 }
 
 function showLive() {
+  $("stage").classList.add("live"); // container 4:3 -> object-fit:cover centre-crops the video
   $("cam").style.display = "block";
   const ov = $("overlay");
   ov.style.position = "absolute";
@@ -330,12 +334,24 @@ async function readFrame(src, w, h) {
   }
 }
 
+// Centre-crop a drawable to aspect `ar` (cover semantics), mirroring the CSS object-fit:cover
+// preview so what the model sees == what the user framed. Trained corners are square-to-landscape
+// (w/h in ~[1.0, 1.5]); a raw portrait phone frame is out-of-distribution and detects a tiny board.
+function cropToAspect(src, sw, sh, ar) {
+  let cw = sw, ch = sh;
+  if (sw / sh > ar) cw = Math.round(sh * ar); // too wide -> trim sides
+  else ch = Math.round(sw / ar);              // too tall -> trim top/bottom
+  const sx = Math.floor((sw - cw) / 2), sy = Math.floor((sh - ch) / 2);
+  const cv = document.createElement("canvas");
+  cv.width = cw; cv.height = ch;
+  cv.getContext("2d").drawImage(src, sx, sy, cw, ch, 0, 0, cw, ch);
+  return cv;
+}
+
 function frameFromVideo() {
   const v = $("cam");
-  const cv = document.createElement("canvas");
-  cv.width = v.videoWidth; cv.height = v.videoHeight;
-  cv.getContext("2d").drawImage(v, 0, 0);
-  return cv;
+  if (!v.videoWidth) return document.createElement("canvas"); // width 0 -> snap handler bails
+  return cropToAspect(v, v.videoWidth, v.videoHeight, TARGET_AR);
 }
 
 // ---- camera + inputs ---------------------------------------------------------

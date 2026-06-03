@@ -15,7 +15,13 @@
       button, label.file { padding: 8px 12px; border: 1px solid #888; border-radius: 8px; cursor: pointer; background: transparent; color: inherit; font: inherit; }
       button:disabled { opacity: 0.45; cursor: default; }
       #stage { position: relative; width: 100%; background: #0002; border-radius: 8px; overflow: hidden; }
-      #cam { width: 100%; height: auto; display: block; }
+      /* Live preview = centred 4:3 crop (object-fit:cover) so a portrait phone frame isn't a
+         long strip; the snapped frame is cropped to match (WYSIWYG). The 4:3 ratio lives on the
+         CONTAINER, not the <video> (browsers ignore aspect-ratio on replaced elements). The .live
+         ratio is removed for the still/file view so tall photos aren't clipped. Keep 4/3 in sync
+         with TARGET_AR in app.js. */
+      #stage.live { aspect-ratio: 4 / 3; }
+      #cam { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center; display: block; }
       #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
       input[type="file"] { display: none; }
       .panel { display: grid; grid-template-columns: auto 1fr; gap: var(--gap); align-items: start; margin-top: var(--gap); }
