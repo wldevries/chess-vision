@@ -340,24 +340,72 @@ function frameFromVideo() {
 
 // ---- camera + inputs ---------------------------------------------------------
 
-async function startCamera() {
+let currentStream = null;
+
+// Phones expose several rear cameras (main / ultra-wide / tele / depth) and
+// facingMode:"environment" often hands back the ultra-wide. Score the labels so
+// the main lens wins by default; the user can still override via the dropdown.
+function preferredCameraId(cams) {
+  if (!cams.length) return null;
+  const score = (label) => {
+    const l = label.toLowerCase();
+    if (/ultra|wide|tele|macro|depth|mono|ir\b|front|facing front|user/.test(l)) return -1;
+    return 1;
+  };
+  const ranked = [...cams].sort((a, b) => score(b.label) - score(a.label));
+  return ranked[0].deviceId;
+}
+
+async function populateCameras(activeId) {
+  let devices = [];
+  try { devices = await navigator.mediaDevices.enumerateDevices(); } catch { return; }
+  const cams = devices.filter((d) => d.kind === "videoinput");
+  // Labels are only populated once permission is granted; bail until then.
+  if (!cams.length || !cams.some((c) => c.label)) return;
+  const sel = $("camera");
+  sel.innerHTML = "";
+  cams.forEach((c, i) => {
+    const opt = document.createElement("option");
+    opt.value = c.deviceId;
+    opt.textContent = c.label || `Camera ${i + 1}`;
+    sel.appendChild(opt);
+  });
+  if (activeId) sel.value = activeId;
+  $("camWrap").style.display = cams.length > 1 ? "" : "none";
+}
+
+async function startCamera(deviceId) {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
-      audio: false,
-    });
+    for (const t of currentStream?.getTracks?.() || []) t.stop();
+    const video = deviceId
+      ? { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } }
+      : { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } };
+    const stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+    currentStream = stream;
     const v = $("cam");
     v.srcObject = stream;
     await v.play();
     showLive();
     $("snap").disabled = false;
     status("camera live — frame the board and Snap.");
+
+    const activeId = stream.getVideoTracks()[0]?.getSettings?.().deviceId;
+    await populateCameras(activeId);
+    // First start (no explicit pick): if the phone gave us a non-main lens but a
+    // better one exists, switch to it once.
+    if (!deviceId) {
+      const cams = (await navigator.mediaDevices.enumerateDevices())
+        .filter((d) => d.kind === "videoinput" && d.label);
+      const preferred = preferredCameraId(cams);
+      if (preferred && preferred !== activeId) return startCamera(preferred);
+    }
   } catch (e) {
     status("camera error: " + e + " (needs https or localhost + permission)");
   }
 }
 
-$("start").addEventListener("click", startCamera);
+$("start").addEventListener("click", () => startCamera());
+$("camera").addEventListener("change", (e) => startCamera(e.target.value));
 $("resume").addEventListener("click", () => {
   showLive();
   status("camera live.");
