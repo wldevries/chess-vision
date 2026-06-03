@@ -68,7 +68,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--device", default="0")
     add("--workers", type=int, default=8)
     add("--seed", type=int, default=0)
-    add("--patience", type=int, default=50, help="early-stop patience (epochs without val gain)")
+    add("--patience", type=int, default=10, help="early-stop patience (epochs without val gain)")
     add("--project", type=Path, default=Path("runs"))
     add("--name", default="yolo_pose", help="run name under --project")
     add("--resume", action="store_true", help="resume an interrupted run from its last.pt")

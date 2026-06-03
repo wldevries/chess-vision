@@ -51,7 +51,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     add("--device", default="0", help="'0' for first GPU, 'cpu', or '0,1' for multi-GPU")
     add("--workers", type=int, default=8)
     add("--seed", type=int, default=0)
-    add("--patience", type=int, default=30, help="early-stop patience (epochs without val gain)")
+    add("--patience", type=int, default=10, help="early-stop patience (epochs without val gain)")
     add("--project", type=Path, default=Path("runs"), help="Ultralytics project dir")
     add("--name", default="yolo_detector", help="run name under --project")
     return p.parse_args(argv)
