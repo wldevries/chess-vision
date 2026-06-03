@@ -310,6 +310,9 @@ function showFrozen(src) {
 }
 
 const setBusy = (on) => { $("busy").hidden = !on; };
+// Resolve after the browser has actually painted (double rAF). Without this, a fast backend (e.g.
+// Chrome NPU) finishes corners+pieces within one frame, so the frozen frame + spinner never render.
+const nextPaint = () => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
 
 function showLive() {
   setBusy(false);
@@ -338,6 +341,7 @@ async function readFrame(src, w, h) {
   $("snap").disabled = true;
   showFrozen(src); // freeze the shot immediately; show the spinner over it during inference
   setBusy(true);
+  await nextPaint(); // guarantee the freeze + spinner render before a (possibly fast) backend runs
   try {
     status(`detecting board… (${backendLabel()})`);
     const pts = await detectCorners(src, w, h);

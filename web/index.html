@@ -44,6 +44,12 @@
       .orient { font-size: 0.9rem; opacity: 0.85; }
       a.lichess { align-self: start; }
       #status { font-size: 0.83rem; opacity: 0.8; white-space: pre-wrap; margin-top: var(--gap); }
+      /* Narrow screens: the board + meta don't fit side-by-side, so stack meta below the board
+         and let the board use the full width. */
+      @media (max-width: 560px) {
+        .panel { grid-template-columns: 1fr; }
+        #board { width: min(320px, 96vw); }
+      }
     </style>
   </head>
   <body>
