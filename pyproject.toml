@@ -59,6 +59,9 @@ dev = [
     "pytest>=8.2,<9",
     "ruff>=0.6,<0.13",
 ]
+rtdetr = [
+    "transformers>=4.52,<6",
+]
 yolo = [
     "onnx>=1.21.0",
     "onnxruntime>=1.26.0",

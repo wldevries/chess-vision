@@ -261,6 +261,9 @@ class ChessReDDetection(Dataset):
         rgb = self._read_rgb(image_id)
         boxes, labels = self._boxes_labels(image_id)
 
+        if self.config.board_crop:
+            rgb, boxes, labels = self._board_crop(image_id, rgb, boxes, labels)
+
         rgb, boxes, _ = self._resize(rgb, boxes)
         if self.train:
             rgb, boxes, _ = self._augment(rgb, boxes)
@@ -272,6 +275,28 @@ class ChessReDDetection(Dataset):
             "image_id": torch.tensor([image_id], dtype=torch.int64),
         }
         return image, target
+
+    def _board_crop(
+        self, image_id: int, rgb: np.ndarray, boxes: np.ndarray, labels: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Crop to the board bbox (when corners exist) so pieces fill more of the frame, then
+        drop any box the crop clipped to <=1px. Runs BEFORE resize, on full-frame targets.
+        Shared by the box detectors; `ChessReDKeypointDetection` overrides `__getitem__` and
+        does its own crop so it can carry the contact keypoint through too. MUST match the
+        eval-time crop (same `geometry.board_crop_bbox` call)."""
+        corners = self.ds.corners(image_id)
+        if not corners:
+            return rgb, boxes, labels
+        h, w = rgb.shape[:2]
+        c = self.config
+        bbox = board_crop_bbox(
+            corners, w, h, side=c.crop_side, top=c.crop_top, bottom=c.crop_bottom
+        )
+        rgb, boxes, _ = apply_board_crop(rgb, boxes, None, bbox)
+        if boxes.size:
+            keep = (boxes[:, 2] - boxes[:, 0] > 1) & (boxes[:, 3] - boxes[:, 1] > 1)
+            boxes, labels = boxes[keep], labels[keep]
+        return rgb, boxes, labels
 
     def _resize(
         self, rgb: np.ndarray, boxes: np.ndarray, keypoints: np.ndarray | None = None
