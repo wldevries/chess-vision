@@ -65,3 +65,29 @@ def test_collate_rewrites_targets_to_coco_zero_indexed():
     assert box["category_id"] == 11  # 12 -> 0-indexed 11
     assert box["bbox"] == [10.0, 20.0, 20.0, 40.0]  # xyxy -> xywh
     assert box["area"] == 800.0 and box["iscrowd"] == 0
+
+
+def test_keypoint_collate_builds_normalized_labels():
+    """RTDetrKeypointCollate maps boxes -> normalized cxcywh, labels -> 0-indexed, and the
+    contact keypoint -> normalized (x, y), aligned per piece."""
+    pytest.importorskip("transformers")
+    from chessvision.rtdetr_keypoint import RTDetrKeypointCollate
+
+    class _StubProcessor:
+        def __call__(self, images, return_tensors):
+            return {}  # collate sets enc["labels"] after
+
+    collate = RTDetrKeypointCollate(_StubProcessor())
+    img = torch.zeros(3, 100, 200)  # H=100, W=200
+    target = {
+        "boxes": torch.tensor([[20.0, 40.0, 60.0, 80.0]]),  # xyxy
+        "labels": torch.tensor([3]),
+        "keypoints": torch.tensor([[[40.0, 70.0, 2.0]]]),  # (1, 1, 3)
+        "image_id": torch.tensor([1]),
+    }
+    lab = collate([(img, target)])["labels"][0]
+    assert lab["class_labels"].tolist() == [2]  # 3 -> 0-indexed 2
+    # cxcywh normalized: cx=40/200=0.2, cy=60/100=0.6, w=40/200=0.2, h=40/100=0.4
+    assert torch.allclose(lab["boxes"][0], torch.tensor([0.2, 0.6, 0.2, 0.4]))
+    # point normalized: 40/200=0.2, 70/100=0.7
+    assert torch.allclose(lab["points"][0], torch.tensor([0.2, 0.7]))
