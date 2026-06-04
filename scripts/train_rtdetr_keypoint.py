@@ -13,7 +13,14 @@ mAP is a sanity check that the source domain didn't regress.
 
     uv run --group rtdetr python scripts/train_rtdetr_keypoint.py \
         --data-root "data/othersets/ChessReD" --store data --test-boards dennis-bord \
-        --epochs 40 --batch-size 4 --device cuda --amp --board-crop
+        --epochs 40 --batch-size 4 --device cuda --amp --board-crop \
+        --color 0.1 --noise 0.03
+
+Appearance aug (`--color`/`--noise`, off by default to match the repo convention) is a **major**
+lever here, not a nicety: it lifted store class_acc 0.673->0.870 and unseen-dennis 0.562->0.786
+(+~0.2). Always include it for a real run. `--hflip 0.5` (default on) is safe -- the keypoint
+datasets mirror contact points. `board_exact` (whole-board FEN) stays low (~0.05) from compounding
++ RT-DETR's 300-query false positives; that, not class_acc, is the remaining deployment gap.
 
 Guarded by `if __name__ == "__main__"` for Windows-spawn DataLoader workers.
 """
